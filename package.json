@@ -1,0 +1,12 @@
+{
+  "name": "milk-pos-railway",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "npm install --prefix dashboard && npm run build --prefix dashboard && npm install --prefix cloud --omit=dev",
+    "start": "npm start --prefix cloud"
+  }
+}
