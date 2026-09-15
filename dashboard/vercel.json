@@ -1,5 +1,5 @@
 {
-  "installCommand": "npm install && npm install --omit=dev --prefix ../frontend && npm install --prefix ../cloud",
+  "build": "npm install --prefix dashboard && npm install --prefix frontend --omit=dev && npm run build --prefix dashboard && npm install --prefix cloud --omit=dev",
   "functions": {
     "api/[...path].js": {
       "includeFiles": "../cloud/**"
