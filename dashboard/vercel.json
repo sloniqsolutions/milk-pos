@@ -1,0 +1,8 @@
+{
+  "installCommand": "npm install && npm install --omit=dev --prefix ../frontend && npm install --prefix ../cloud",
+  "functions": {
+    "api/[...path].js": {
+      "includeFiles": "../cloud/**"
+    }
+  }
+}

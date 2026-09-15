@@ -1,0 +1,94 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# The till's real branch API key, written when pairing with the cloud
+# (see backend/db/cloud-config.js) — a live credential, never committed.
+backend/cloud-sync.json
+
+# This install's activation state and machine identity (see
+# backend/db/activation-config.js) — local to one machine, never committed.
+backend/activation.json
+backend/device-id.json
+
+# Database files
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+backend/db/*.db
+backend/db/*.sqlite
+backend/db/*.sqlite3
+backend/backups/
+
+# Bundled binaries — never commit these
+frontend/electron/node.exe
+*.exe
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+.nuxt/
+.vuepress/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+.DS_Store
+Thumbs.db
+*.lnk
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Testing
+coverage/
+.nyc_output/
+
+# Misc
+.cache/
+.temp/
+.tmp/
+*.pid
+*.seed
+*.pid.lock
+
+# Vite
+.vite/
+
+# TypeScript
+*.tsbuildinfo
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+frontend/release/

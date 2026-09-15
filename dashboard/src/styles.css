@@ -1,0 +1,111 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * The dashboard's stylesheet.
+ *
+ * Deliberately NOT an import of frontend/src/index.css, even though the screens
+ * come from there. That file styles a till: it pins `body` to
+ * `overflow: hidden; min-width: 1280px; min-height: 100vh` so the POS renders
+ * as a fixed, non-scrolling desktop shell inside an Electron window. On a web
+ * page the same rules stop the page scrolling at all and force a horizontal
+ * scrollbar on anything narrower than 1280px — a report longer than the
+ * viewport simply could not be read.
+ *
+ * So the theme variables are shared (the Tailwind config resolves its colours
+ * through them, and without these every `bg-card` and `border-border` would
+ * compute to nothing) while the layout rules are the dashboard's own.
+ */
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 3.9%;
+    --primary: 0 0% 7%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 0 0% 96.1%;
+    --secondary-foreground: 0 0% 9%;
+    --muted: 0 0% 96.1%;
+    --muted-foreground: 0 0% 45.1%;
+    --accent: 0 0% 96.1%;
+    --accent-foreground: 0 0% 9%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 89.8%;
+    --input: 0 0% 89.8%;
+    --ring: 0 72% 51%;
+    --chart-1: 0 72% 51%;
+    --chart-2: 0 0% 7%;
+    --chart-3: 36 76% 57%;
+    --chart-4: 0 63% 31%;
+    --chart-5: 33 92% 36%;
+    --radius: 0.5rem;
+    --font-heading: ui-sans-serif, system-ui, sans-serif;
+    --font-body: ui-sans-serif, system-ui, sans-serif;
+    --font-display: ui-sans-serif, system-ui, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  /* The opposite of the till: this page scrolls, and reflows down to a phone. */
+  min-width: 0;
+  overflow-x: hidden;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  color: #111827;
+  background: #F5F5F0;
+  -webkit-font-smoothing: antialiased;
+}
+
+button { font-family: inherit; }
+input:focus, select:focus { border-color: #DC2626; }
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: #F3F4F6;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+/*
+ * The POS screens were written for a fixed-width till beside a sidebar, so
+ * several set their own `height: 100vh` and hide their overflow. Inside the
+ * dashboard's own header that produces a pane which is a full viewport tall
+ * *below* the header — pushing the bottom of every report off the screen with
+ * no way to reach it.
+ */
+.pos-screen > div,
+.pos-screen > section {
+  height: auto !important;
+  min-height: 0 !important;
+  overflow: visible !important;
+}
+
+/*
+ * The Reports filter row asks for this class, and until now nothing defined it
+ * anywhere — so a stray scrollbar sat under the date chips on the till too.
+ * Fixed in both; kept here rather than inherited because this stylesheet
+ * deliberately does not import the till's.
+ */
+.hide-scrollbar {
+  scrollbar-width: none;          /* Firefox */
+  -ms-overflow-style: none;       /* older Edge */
+}
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;                  /* Chromium, which is what Electron is */
+}
+
+/* Used by the Sync now button while a push is in flight. */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}

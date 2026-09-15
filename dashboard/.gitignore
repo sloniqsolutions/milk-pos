@@ -1,0 +1,7 @@
+node_modules/
+dist/
+
+# As in cloud/: the repo root ignores lockfiles everywhere, overridden here so
+# a build is reproducible rather than picking up whatever versions are current
+# on the day it is deployed.
+!package-lock.json

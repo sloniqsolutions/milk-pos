@@ -1,0 +1,333 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+  overflow: hidden;
+  min-width: 1280px;
+  min-height: 100vh;
+}
+
+/* Custom scrollbar for glass panels */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(17,17,17,0.18);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(17,17,17,0.30);
+}
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 3.9%;
+    --primary: 0 0% 7%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 0 0% 96.1%;
+    --secondary-foreground: 0 0% 9%;
+    --muted: 0 0% 96.1%;
+    --muted-foreground: 0 0% 45.1%;
+    --accent: 0 0% 96.1%;
+    --accent-foreground: 0 0% 9%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 89.8%;
+    --input: 0 0% 89.8%;
+    --ring: 0 72% 51%;
+    --chart-1: 0 72% 51%;
+    --chart-2: 0 0% 7%;
+    --chart-3: 36 76% 57%;
+    --chart-4: 0 63% 31%;
+    --chart-5: 33 92% 36%;
+    --radius: 0.5rem;
+    --font-heading: ui-sans-serif, system-ui, sans-serif;
+    --font-body: ui-sans-serif, system-ui, sans-serif;
+    --font-display: ui-sans-serif, system-ui, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+
+  .dark {
+    --background: 0 0% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 3.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 3.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 0 0% 9%;
+    --secondary: 0 0% 14.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 0 0% 14.9%;
+    --muted-foreground: 0 0% 63.9%;
+    --accent: 0 0% 14.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 14.9%;
+    --input: 0 0% 14.9%;
+    --ring: 0 0% 83.1%;
+    --chart-1: 220 70% 50%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 280 65% 60%;
+    --chart-5: 340 75% 55%;
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground font-body;
+  }
+}
+
+@media print {
+  /*
+    Undo the app-shell constraints on the page itself.
+    
+    `body` carries `overflow: hidden`, `min-width: 1280px` and
+    `min-height: 100vh` so the till renders as a fixed desktop layout. On paper
+    those are ruinous and were the real cause of the mangled receipts:
+
+      min-width: 1280px  forced the document far wider than an 80mm page, so
+                         everything past the page edge was clipped — and
+                         reducing the print scale did not help, because the
+                         body stayed 1280px wide and only the slice that fell
+                         inside the page was ever printed.
+
+      overflow: hidden   clipped the print flow to a single viewport, so only
+                         the first of the three copies came out at all.
+
+    Nothing in the print stylesheet reset them, so every fix applied further
+    down the tree was undone here.
+  */
+  html, body {
+    overflow: visible !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    height: auto !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #FFFFFF !important;
+  }
+
+  /*
+    Unclamp every ancestor of the printable area.
+
+    The app shell wraps each screen in `height: 100vh; overflow: hidden` so the
+    till fills the window and never scrolls. Those wrappers sit above the
+    receipt modal and are not marked `.print-root`, so nothing reset them: they
+    clamped the print flow to a single screen's worth of height and clipped the
+    rest. Three receipts totalling ~545mm were cut down to one page, which is
+    why only the first copy ever came out.
+
+    `:has()` selects exactly the ancestor chain, so the receipt itself is
+    left alone.
+  */
+  *:has(#printable-area) {
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    position: static !important;
+  }
+
+  /*
+    Take everything that is not the receipt out of the page entirely.
+
+    This used `visibility: hidden`, which hides an element but keeps its layout
+    box. Once the shell wrappers above were unclamped, the sidebar and the sale
+    screen still occupied about a metre and a half of page height, so the three
+    receipts were followed by several blank pages — more roll wasted, not less.
+
+    `:has()` keeps the receipt, everything inside it, and its ancestors;
+    everything else is removed from the flow. The visibility rules are kept
+    underneath as a harmless fallback.
+  */
+  body *:not(:has(#printable-area)):not(#printable-area):not(#printable-area *) {
+    display: none !important;
+  }
+
+  body * {
+    visibility: hidden;
+  }
+  #printable-area, #printable-area * {
+    visibility: visible;
+  }
+
+  /*
+    The receipt modal is `position: fixed` with its own scroll container.
+    Fixed and scrollable ancestors do not paginate — the browser renders
+    them as a single clipped viewport, which is why the third copy was
+    cut off. These resets flatten every ancestor back into normal flow
+    so the content can break across pages properly.
+  */
+  .print-root {
+    position: static !important;
+    overflow: visible !important;
+    display: block !important;
+    height: auto !important;
+    max-height: none !important;
+    width: auto !important;
+    max-width: none !important;
+    background: none !important;
+    backdrop-filter: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    inset: auto !important;
+  }
+
+  /*
+    Width is the printable width of the roll, not the roll's physical width.
+    An 80mm roll only prints across about 72mm — the rest is hardware margin —
+    so laying the receipt out at a full 80mm pushed the right-hand side past
+    what the head can reach and it came out cut off.
+  */
+  #printable-area {
+    position: static !important;
+    display: block !important;
+    width: var(--receipt-width, 72mm);
+    gap: 0 !important;
+    margin: 0 auto !important;
+    overflow: visible !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+
+  /*
+    Never clip. The receipt card uses overflow:hidden on screen to keep its
+    rounded corners, which on paper silently truncated any line too wide for
+    the box instead of wrapping it — the reason names came out mid-word.
+  */
+  #printable-area, #printable-area * {
+    overflow: visible !important;
+    overflow-wrap: break-word !important;
+    word-break: break-word !important;
+    box-shadow: none !important;
+  }
+
+  /* One copy per page so the thermal printer cuts between tickets. The
+     last must not emit a trailing blank page. */
+  .receipt-copy {
+    page-break-after: always;
+    break-after: page;
+    page-break-inside: avoid;
+    break-inside: avoid;
+    box-shadow: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+    margin: 0 auto !important;
+    /* Set by ReceiptModal from the paper_size setting; 72mm is the printable
+       width of an 80mm roll, 48mm that of a 58mm roll. */
+    width: var(--receipt-width, 72mm) !important;
+    max-width: var(--receipt-width, 72mm) !important;
+  }
+  .receipt-copy:last-child {
+    page-break-after: auto;
+    break-after: auto;
+  }
+
+  /* Screen-only chrome. */
+  .no-print {
+    display: none !important;
+  }
+
+  /*
+    Page size.
+
+    This read `size: 80mm auto`, which is not valid CSS — `size` takes `auto`,
+    or one or two lengths, never a mix. Chromium dropped the whole declaration
+    and fell back to the printer's default paper, so each receipt was laid out
+    on a Letter page (measured: 215.9mm x 279.4mm, identical to having no rule
+    at all). On a continuous till roll that means the printer feeds a full
+    Letter page per copy — three copies, three pages of paper — which is why it
+    "kept rolling and didn't stop".
+
+    The real height is set at print time by ReceiptModal, which measures the
+    rendered receipt and injects an exact `size: <width> <height>`. This is the
+    fallback if that ever fails to run: a roll-width page rather than Letter.
+  */
+  @page {
+    size: 80mm 200mm;
+    margin: 0;
+  }
+}
+
+
+/*
+  Measuring the printed height.
+
+  ReceiptModal has to know how tall a receipt will be *on paper* so it can size
+  the page to it. It cannot simply measure the on-screen receipt: the rules
+  that change the layout — the narrower printable width and the word breaking —
+  live inside `@media print`, which does not apply on screen, so the on-screen
+  box is wider and shorter than the printed one. Measuring it produced a page
+  shorter than the content, and the overflow spilled onto a second page, which
+  on a roll means more paper rather than less.
+
+  These are the same layout rules, outside the media query, applied to the
+  receipt for the instant it is measured and then removed.
+*/
+.measuring-print {
+  width: var(--receipt-width, 72mm) !important;
+  margin: 0 auto !important;
+}
+.measuring-print,
+.measuring-print * {
+  overflow: visible !important;
+  overflow-wrap: break-word !important;
+  word-break: break-word !important;
+}
+.measuring-print .receipt-copy {
+  width: var(--receipt-width, 72mm) !important;
+  max-width: var(--receipt-width, 72mm) !important;
+  margin: 0 auto !important;
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  15% { transform: translateX(-7px); }
+  30% { transform: translateX(7px); }
+  45% { transform: translateX(-5px); }
+  60% { transform: translateX(5px); }
+  75% { transform: translateX(-3px); }
+  90% { transform: translateX(3px); }
+}
