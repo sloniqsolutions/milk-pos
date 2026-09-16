@@ -58,36 +58,49 @@ export default function OrdersScreen() {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    const { from, to } = rangeDates(rangeKey);
-    const qs = new URLSearchParams(branchId ? { from, to, branch: branchId } : { from, to });
 
-    // Voided orders included deliberately: an owner looking through orders
-    // wants to see the one that was cancelled, not have it quietly omitted.
-    qs.set('include_voided', '1');
+    const load = (silent) => {
+      if (!silent) setLoading(true);
+      const { from, to } = rangeDates(rangeKey);
+      const qs = new URLSearchParams(branchId ? { from, to, branch: branchId } : { from, to });
 
-    fetch(`/api/reports/detailed?${qs}`, { credentials: 'include' })
-      .then(async (r) => {
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error || 'Could not load orders');
-        return data;
-      })
-      .then((rows) => {
-        if (cancelled) return;
-        setOrders(Array.isArray(rows) ? rows : []);
-        setError(null);
-      })
-      .catch(e => { if (!cancelled) setError(e.message); })
-      .finally(() => { if (!cancelled) setLoading(false); });
+      // Voided orders included deliberately: an owner looking through orders
+      // wants to see the one that was cancelled, not have it quietly omitted.
+      qs.set('include_voided', '1');
 
-    return () => { cancelled = true; };
+      fetch(`/api/reports/detailed?${qs}`, { credentials: 'include' })
+        .then(async (r) => {
+          const data = await r.json();
+          if (!r.ok) throw new Error(data.error || 'Could not load orders');
+          return data;
+        })
+        .then((rows) => {
+          if (cancelled) return;
+          setOrders(Array.isArray(rows) ? rows : []);
+          setError(null);
+        })
+        .catch(e => { if (!cancelled) setError(e.message); })
+        .finally(() => { if (!cancelled && !silent) setLoading(false); });
+    };
+
+    load(false);
+    // Silent background refresh — keeps the list current without owner having
+    // to reload the page, without re-showing the loading spinner every time.
+    const poll = setInterval(() => load(true), 15000);
+
+    return () => { cancelled = true; clearInterval(poll); };
   }, [branchId, rangeKey]);
 
   useEffect(() => {
-    fetch('/api/branches/completeness', { credentials: 'include' })
-      .then(r => (r.ok ? r.json() : { branches: [] }))
-      .catch(() => ({ branches: [] }))
-      .then(d => setCompleteness(d.branches || []));
+    const load = () =>
+      fetch('/api/branches/completeness', { credentials: 'include' })
+        .then(r => (r.ok ? r.json() : { branches: [] }))
+        .catch(() => ({ branches: [] }))
+        .then(d => setCompleteness(d.branches || []));
+
+    load();
+    const poll = setInterval(load, 15000);
+    return () => clearInterval(poll);
   }, [branchId, rangeKey]);
 
   const behind = completeness.filter(

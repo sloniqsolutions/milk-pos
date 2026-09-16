@@ -41,23 +41,32 @@ export default function CustomersScreen() {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    const qs = branchId ? `?branch=${branchId}` : '';
-    fetch(`/api/customers${qs}`, { credentials: 'include' })
-      .then(async (r) => {
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error || 'Could not load customers');
-        return data;
-      })
-      .then((data) => {
-        if (cancelled) return;
-        setRows(data.customers || []);
-        setTotals(data.totals || {});
-        setError(null);
-      })
-      .catch((e) => { if (!cancelled) setError(e.message); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
+
+    const load = (silent) => {
+      if (!silent) setLoading(true);
+      const qs = branchId ? `?branch=${branchId}` : '';
+      fetch(`/api/customers${qs}`, { credentials: 'include' })
+        .then(async (r) => {
+          const data = await r.json();
+          if (!r.ok) throw new Error(data.error || 'Could not load customers');
+          return data;
+        })
+        .then((data) => {
+          if (cancelled) return;
+          setRows(data.customers || []);
+          setTotals(data.totals || {});
+          setError(null);
+        })
+        .catch((e) => { if (!cancelled) setError(e.message); })
+        .finally(() => { if (!cancelled && !silent) setLoading(false); });
+    };
+
+    load(false);
+    // Silent background refresh — balances change as the till takes payments,
+    // without the owner having to reload the page.
+    const poll = setInterval(() => load(true), 15000);
+
+    return () => { cancelled = true; clearInterval(poll); };
   }, [branchId]);
 
   const term = search.trim().toLowerCase();
