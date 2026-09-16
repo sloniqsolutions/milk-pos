@@ -139,6 +139,23 @@ db.exec(`
     FOREIGN KEY (variant_id) REFERENCES item_variants(id) ON DELETE CASCADE
   );
 
+  -- One row per stock movement: a restock/adjustment from the Inventory
+  -- screen, a milk->yogurt conversion, or reported waste. 'amount' is signed
+  -- (positive = added, negative = removed) so a running total for any
+  -- ingredient is just SUM(amount). 'entry_date' is the date the owner picked
+  -- for the movement, independent of 'created_at' (when the row was actually
+  -- entered) — that's what lets Stock History be searched/sorted by the date
+  -- milk actually arrived rather than the date someone got around to typing it in.
+  CREATE TABLE IF NOT EXISTS inventory_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ingredient_id INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    amount REAL NOT NULL,
+    entry_date TEXT NOT NULL,
+    created_at DATETIME DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY (ingredient_id) REFERENCES ingredients(id) ON DELETE CASCADE
+  );
+
   -- FIX (Bug 5): Shift Management in Settings was entirely client-side fake
   -- data (hardcoded 23 orders / Rs. 12,400 and three invented history rows).
   -- This table makes it real and auditable.
@@ -519,6 +536,23 @@ try {
   }
 } catch (e) {
   console.error('Migration for 3 milk items failed:', e.message);
+}
+
+// Migration: seed the 'Yogurt' ingredient (grams), made by converting Milk.
+try {
+  const done = db.prepare("SELECT value FROM settings WHERE key = 'migration_yogurt_ingredient_v1'").get();
+  if (!done) {
+    const existing = db.prepare("SELECT id FROM ingredients WHERE name = 'Yogurt'").get();
+    if (!existing) {
+      db.prepare(
+        "INSERT INTO ingredients (name, unit, stock, cost_per_unit, low_stock_threshold) VALUES ('Yogurt', 'grams', 0, 0, 0)"
+      ).run();
+    }
+    db.prepare("INSERT INTO settings (key, value) VALUES ('migration_yogurt_ingredient_v1', '1') ON CONFLICT(key) DO UPDATE SET value = '1'").run();
+    console.log('Yogurt ingredient migration applied successfully.');
+  }
+} catch (e) {
+  console.error('Migration for Yogurt ingredient failed:', e.message);
 }
 
 // ─── Auto Backup ────────────────────────────────────────────────────────────

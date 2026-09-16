@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Home as HomeIcon, User, ClipboardList, BarChart2, Settings, LogOut, GlassWater, Package, Clock, Wallet, Users } from 'lucide-react';
+import { Home as HomeIcon, User, ClipboardList, BarChart2, Settings, LogOut, GlassWater, Package, Clock, Wallet, Users, History } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { shiftsAPI } from '@/api/index';
 import useDialogs from '@/lib/useDialogs';
@@ -27,6 +27,7 @@ const ADMIN_NAV: NavItem[] = [
   { id: 'customers',icon: Users,         label: 'Customers' },
   { id: 'menu',     icon: GlassWater,    label: 'Menu',      adminOnly: true },
   { id: 'inventory',icon: Package,       label: 'Inventory', adminOnly: true },
+  { id: 'stock-history', icon: History,  label: 'Stock History', adminOnly: true },
   { id: 'cashier',  icon: User,          label: 'Staff',     adminOnly: true },
   { id: 'shifts',   icon: Clock,         label: 'Shifts' },
   { id: 'expenses', icon: Wallet,        label: 'Expenses' },
@@ -40,6 +41,7 @@ const MANAGER_NAV: NavItem[] = [
   { id: 'customers',icon: Users,         label: 'Customers' },
   { id: 'menu',     icon: GlassWater,    label: 'Menu' },
   { id: 'inventory',icon: Package,       label: 'Inventory' },
+  { id: 'stock-history', icon: History,  label: 'Stock History' },
   { id: 'shifts',   icon: Clock,         label: 'Shifts' },
   { id: 'expenses', icon: Wallet,        label: 'Expenses' },
   { id: 'reports',  icon: BarChart2,     label: 'Reports' },

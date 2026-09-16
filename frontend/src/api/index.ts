@@ -235,15 +235,36 @@ interface Ingredient {
  * meant Inventory was effectively dead in production. Everything now goes
  * through `request()`, which uses the absolute BASE_URL.
  */
+export interface InventoryEntry {
+  id: number;
+  ingredient_id: number;
+  type: 'stock' | 'yogurt_conversion' | 'waste';
+  amount: number;
+  entry_date: string;
+  created_at: string;
+  ingredient_name: string;
+  ingredient_unit: string;
+}
+
 export const inventoryAPI = {
   getAll: () => request<Ingredient[]>('GET', '/inventory'),
-  create: (data: { name: string; unit: string; stock?: number; low_stock_threshold?: number }) =>
+  create: (data: { name: string; unit: string; stock?: number; low_stock_threshold?: number; date?: string }) =>
     request<Ingredient>('POST', '/inventory', data),
-  updateStock: (id: number, body: { action?: 'add' | 'subtract'; amount?: number; stock?: number }) =>
+  updateStock: (id: number, body: { action?: 'add' | 'subtract'; amount?: number; stock?: number; date?: string }) =>
     request<Ingredient>('PUT', `/inventory/${id}/stock`, body),
   updateThreshold: (id: number, threshold: number) =>
     request<Ingredient>('PUT', `/inventory/${id}/threshold`, { threshold }),
   lowStock: () => request<{ count: number }>('GET', '/inventory/low-stock'),
+  history: (params: { type?: string; ingredient_id?: number; from?: string; to?: string } = {}) => {
+    const qs = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== '') qs.set(k, String(v)); });
+    const suffix = qs.toString();
+    return request<InventoryEntry[]>('GET', `/inventory/history${suffix ? `?${suffix}` : ''}`);
+  },
+  convertToYogurt: (body: { milk_amount: number; yogurt_amount: number; date?: string }) =>
+    request<{ milk: Ingredient; yogurt: Ingredient }>('POST', '/inventory/convert-to-yogurt', body),
+  reportWaste: (body: { ingredient_id: number; amount: number; date?: string }) =>
+    request<Ingredient>('POST', '/inventory/waste', body),
 };
 
 export const shiftsAPI = {

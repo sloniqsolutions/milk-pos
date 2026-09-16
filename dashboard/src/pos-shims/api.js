@@ -181,6 +181,13 @@ export const inventoryAPI = {
   updateStock: readOnly('Stock'),
   updateThreshold: readOnly('Stock'),
   delete: readOnly('Stock'),
+  // Stock history, yogurt conversion and waste reporting are till-only too —
+  // same reasoning as the rest of this object. Stubbed so InventoryScreen's
+  // buttons fail with the same explanatory message instead of a raw
+  // "not a function" when that shared screen renders on the dashboard.
+  history: () => Promise.resolve([]),
+  convertToYogurt: readOnly('Stock'),
+  reportWaste: readOnly('Stock'),
 };
 
 /* ------------------------------------------------------------------ menu -- */

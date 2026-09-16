@@ -7,6 +7,7 @@ import Orders from '@/pages/Orders';
 import Reports from '@/pages/Reports';
 import Settings from '@/pages/Settings';
 import InventoryScreen from '@/pages/InventoryScreen';
+import StockHistoryScreen from '@/pages/StockHistoryScreen';
 import ShiftsScreen from '@/pages/ShiftsScreen';
 import ExpensesScreen from '@/pages/ExpensesScreen';
 import CustomersScreen from '@/pages/CustomersScreen';
@@ -24,6 +25,7 @@ const screens: Record<string, React.ComponentType<{ onNavigate?: (page: string) 
   reports: Reports,
   settings: Settings,
   inventory: InventoryScreen,
+  'stock-history': StockHistoryScreen,
   shifts: ShiftsScreen,
   expenses: ExpensesScreen,
 };

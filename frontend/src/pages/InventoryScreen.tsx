@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Plus, Package, Edit2, AlertCircle } from 'lucide-react';
-import { inventoryAPI } from '@/api/index';
+import { Plus, Package, Edit2, AlertCircle, Droplet, Trash2 } from 'lucide-react';
+import { inventoryAPI, ApiError } from '@/api/index';
 import SearchBar from '@/components/pos-ui/SearchBar';
 import Modal from '@/components/pos-ui/Modal';
 import useDialogs from '@/lib/useDialogs';
@@ -17,6 +17,21 @@ interface Ingredient {
   low_stock_threshold: number;
 }
 
+/** YYYY-MM-DD in local time — matches what the date <input> reads/writes and
+ * what the backend stores entries under (see backend/routes/inventory.js). */
+const todayStr = () => new Date().toLocaleDateString('en-CA');
+
+const dateInputStyle = {
+  width: '100%', padding: '10px 12px', border: '1.5px solid #E5E9F0', borderRadius: 8,
+  fontSize: 14, outline: 'none', background: '#F7F9FC', boxSizing: 'border-box' as const,
+};
+const dateInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
+  e.currentTarget.style.borderColor = BLUE; e.currentTarget.style.background = '#FFFFFF';
+};
+const dateInputBlur = (e: React.FocusEvent<HTMLInputElement>) => {
+  e.currentTarget.style.borderColor = '#E5E9F0'; e.currentTarget.style.background = '#F7F9FC';
+};
+
 export default function InventoryScreen() {
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
   const [loading, setLoading] = useState(true);
@@ -31,11 +46,28 @@ export default function InventoryScreen() {
   const [addUnit, setAddUnit] = useState('Litre');
   const [addStock, setAddStock] = useState('0');
   const [addThreshold, setAddThreshold] = useState('0');
+  const [addDate, setAddDate] = useState(todayStr());
 
   // Edit form state
   const [editAction, setEditAction] = useState<'add' | 'subtract' | 'set'>('add');
   const [editAmount, setEditAmount] = useState('');
   const [editThreshold, setEditThreshold] = useState('');
+  const [editDate, setEditDate] = useState(todayStr());
+
+  // Convert to Yogurt modal state
+  const [showYogurtModal, setShowYogurtModal] = useState(false);
+  const [yogurtMilkAmount, setYogurtMilkAmount] = useState('');
+  const [yogurtAmount, setYogurtAmount] = useState('');
+  const [yogurtDate, setYogurtDate] = useState(todayStr());
+
+  // Report Waste modal state
+  const [showWasteModal, setShowWasteModal] = useState(false);
+  const [wasteIngredientId, setWasteIngredientId] = useState('');
+  const [wasteAmount, setWasteAmount] = useState('');
+  const [wasteDate, setWasteDate] = useState(todayStr());
+
+  const milkIngredient = ingredients.find(i => i.name === 'Milk');
+  const yogurtIngredient = ingredients.find(i => i.name === 'Yogurt');
 
   // Name or unit, so "Litre" narrows to everything counted in litres.
   const visibleIngredients = useMemo(() => {
@@ -72,11 +104,13 @@ export default function InventoryScreen() {
         unit: addUnit.trim(),
         stock: parseFloat(addStock) || 0,
         low_stock_threshold: parseFloat(addThreshold) || 0,
+        date: addDate,
       });
       setShowAddModal(false);
       setAddName('');
       setAddStock('0');
       setAddThreshold('0');
+      setAddDate(todayStr());
       fetchInventory();
     } catch (err) {
       console.error(err);
@@ -92,6 +126,7 @@ export default function InventoryScreen() {
     setEditAction('add');
     setEditAmount('');
     setEditThreshold(ing.low_stock_threshold.toString());
+    setEditDate(todayStr());
     setShowEditModal(true);
   };
 
@@ -105,8 +140,8 @@ export default function InventoryScreen() {
         const amt = parseFloat(editAmount);
         if (!isNaN(amt)) {
           const payload = editAction === 'set'
-            ? { stock: amt }
-            : { action: editAction, amount: amt };
+            ? { stock: amt, date: editDate }
+            : { action: editAction, amount: amt, date: editDate };
 
           await inventoryAPI.updateStock(selectedIngredient.id, payload);
         }
@@ -122,6 +157,59 @@ export default function InventoryScreen() {
       fetchInventory();
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const openYogurtModal = () => {
+    setYogurtMilkAmount('');
+    setYogurtAmount('');
+    setYogurtDate(todayStr());
+    setShowYogurtModal(true);
+  };
+
+  const handleConvertSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const milkAmt = parseFloat(yogurtMilkAmount);
+    const yogurtAmt = parseFloat(yogurtAmount);
+    if (!(milkAmt > 0) || !(yogurtAmt > 0)) return;
+
+    try {
+      await inventoryAPI.convertToYogurt({ milk_amount: milkAmt, yogurt_amount: yogurtAmt, date: yogurtDate });
+      setShowYogurtModal(false);
+      fetchInventory();
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'INSUFFICIENT_MILK') {
+        alertCard({ title: 'Not enough milk', message: 'Not enough milk in stock for this conversion.', tone: 'warning' });
+      } else {
+        alertCard({
+          title: 'Could not convert',
+          message: err instanceof Error ? err.message : 'Failed to convert milk to yogurt',
+        });
+      }
+    }
+  };
+
+  const openWasteModal = () => {
+    setWasteIngredientId(ingredients[0] ? String(ingredients[0].id) : '');
+    setWasteAmount('');
+    setWasteDate(todayStr());
+    setShowWasteModal(true);
+  };
+
+  const handleWasteSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const amt = parseFloat(wasteAmount);
+    if (!wasteIngredientId || !(amt > 0)) return;
+
+    try {
+      await inventoryAPI.reportWaste({ ingredient_id: parseInt(wasteIngredientId, 10), amount: amt, date: wasteDate });
+      setShowWasteModal(false);
+      fetchInventory();
+    } catch (err) {
+      alertCard({
+        title: 'Could not report waste',
+        message: err instanceof Error ? err.message : 'Failed to report waste',
+      });
     }
   };
 
@@ -149,20 +237,48 @@ export default function InventoryScreen() {
             <p style={{ fontSize: 13, color: '#6B7280', margin: '2px 0 0' }}>Track and adjust ingredient stock levels</p>
           </div>
         </div>
-        <button
-          onClick={() => setShowAddModal(true)}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 8,
-            padding: '10px 18px', background: BLUE, color: '#FFF',
-            borderRadius: 8, border: 'none', fontWeight: 600, fontSize: 14,
-            cursor: 'pointer', boxShadow: '0 4px 10px rgba(27,76,130,0.28)',
-            transition: 'background 140ms'
-          }}
-          onMouseEnter={e => { e.currentTarget.style.background = BLUE_DARK; }}
-          onMouseLeave={e => { e.currentTarget.style.background = BLUE; }}
-        >
-          <Plus size={18} /> New Ingredient
-        </button>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button
+            onClick={openWasteModal}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '10px 16px', background: '#FFFFFF', color: '#B91C1C',
+              borderRadius: 8, border: '1.5px solid #FCA5A5', fontWeight: 600, fontSize: 14,
+              cursor: 'pointer', transition: 'background 140ms'
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = '#FEF2F2'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = '#FFFFFF'; }}
+          >
+            <Trash2 size={17} /> Report Waste
+          </button>
+          <button
+            onClick={openYogurtModal}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '10px 16px', background: BLUE_TINT, color: BLUE_DARK,
+              borderRadius: 8, border: `1.5px solid ${BLUE}`, fontWeight: 600, fontSize: 14,
+              cursor: 'pointer', transition: 'background 140ms'
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = '#DCEAFA'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = BLUE_TINT; }}
+          >
+            <Droplet size={17} /> Convert to Yogurt
+          </button>
+          <button
+            onClick={() => setShowAddModal(true)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '10px 18px', background: BLUE, color: '#FFF',
+              borderRadius: 8, border: 'none', fontWeight: 600, fontSize: 14,
+              cursor: 'pointer', boxShadow: '0 4px 10px rgba(27,76,130,0.28)',
+              transition: 'background 140ms'
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = BLUE_DARK; }}
+            onMouseLeave={e => { e.currentTarget.style.background = BLUE; }}
+          >
+            <Plus size={18} /> New Ingredient
+          </button>
+        </div>
       </div>
 
       {/* Main Content */}
@@ -267,6 +383,10 @@ export default function InventoryScreen() {
               <input type="number" step="any" min="0" required value={addThreshold} onChange={e => setAddThreshold(e.target.value)} style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #E5E9F0', borderRadius: 8, fontSize: 14, outline: 'none', background: '#F7F9FC', boxSizing: 'border-box' }} onFocus={e => { e.currentTarget.style.borderColor = BLUE; e.currentTarget.style.background = '#FFFFFF'; }} onBlur={e => { e.currentTarget.style.borderColor = '#E5E9F0'; e.currentTarget.style.background = '#F7F9FC'; }} />
             </div>
           </div>
+          <div>
+            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 6 }}>Date</label>
+            <input type="date" required value={addDate} onChange={e => setAddDate(e.target.value)} style={dateInputStyle} onFocus={dateInputFocus} onBlur={dateInputBlur} />
+          </div>
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 8 }}>
             <button type="button" onClick={() => setShowAddModal(false)} style={{ padding: '10px 16px', background: '#FFFFFF', color: '#6B7280', borderRadius: 8, border: '1.5px solid #E5E9F0', fontWeight: 600, fontSize: 14, cursor: 'pointer' }}>Cancel</button>
             <button type="submit" style={{ padding: '10px 18px', background: BLUE, color: '#FFF', borderRadius: 8, border: 'none', fontWeight: 600, fontSize: 14, cursor: 'pointer', boxShadow: '0 4px 10px rgba(27,76,130,0.28)' }}>Add Ingredient</button>
@@ -315,13 +435,13 @@ export default function InventoryScreen() {
             <div>
               <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 6 }}>Low Stock Threshold</label>
               <div style={{ display: 'flex', gap: 8 }}>
-                <input 
-                  type="number" 
-                  step="any" 
-                  required 
-                  value={editThreshold} 
-                  onChange={e => setEditThreshold(e.target.value)} 
-                  style={{ flex: 1, padding: '10px 12px', border: '1.5px solid #E5E9F0', borderRadius: 8, fontSize: 14, outline: 'none', background: '#F7F9FC' }} 
+                <input
+                  type="number"
+                  step="any"
+                  required
+                  value={editThreshold}
+                  onChange={e => setEditThreshold(e.target.value)}
+                  style={{ flex: 1, padding: '10px 12px', border: '1.5px solid #E5E9F0', borderRadius: 8, fontSize: 14, outline: 'none', background: '#F7F9FC' }}
                   onFocus={e => { e.currentTarget.style.borderColor = BLUE; e.currentTarget.style.background = '#FFFFFF'; }}
                   onBlur={e => { e.currentTarget.style.borderColor = '#E5E9F0'; e.currentTarget.style.background = '#F7F9FC'; }}
                 />
@@ -331,6 +451,11 @@ export default function InventoryScreen() {
               </div>
             </div>
 
+            <div>
+              <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 6 }}>Date</label>
+              <input type="date" required value={editDate} onChange={e => setEditDate(e.target.value)} style={dateInputStyle} onFocus={dateInputFocus} onBlur={dateInputBlur} />
+            </div>
+
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 8 }}>
               <button type="button" onClick={() => setShowEditModal(false)} style={{ padding: '10px 16px', background: '#FFFFFF', color: '#6B7280', borderRadius: 8, border: '1.5px solid #E5E9F0', fontWeight: 600, fontSize: 14, cursor: 'pointer' }}>Cancel</button>
               <button type="submit" style={{ padding: '10px 18px', background: BLUE, color: '#FFF', borderRadius: 8, border: 'none', fontWeight: 600, fontSize: 14, cursor: 'pointer', boxShadow: '0 4px 10px rgba(27,76,130,0.28)' }}>Save Changes</button>
@@ -338,6 +463,67 @@ export default function InventoryScreen() {
           </form>
         </Modal>
       )}
+
+      {/* Convert to Yogurt Modal */}
+      <Modal isOpen={showYogurtModal} onClose={() => setShowYogurtModal(false)} title="Convert Milk to Yogurt" width={440}>
+        <form onSubmit={handleConvertSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ background: BLUE_TINT, borderRadius: 8, padding: '10px 14px', border: '1px solid #C8DCED', display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ fontSize: 13, color: '#6B7280' }}>
+              Milk in stock: <strong style={{ color: BLUE_DARK }}>{milkIngredient ? `${milkIngredient.stock} ${milkIngredient.unit}` : '—'}</strong>
+            </span>
+            <span style={{ fontSize: 13, color: '#6B7280' }}>
+              Yogurt in stock: <strong style={{ color: BLUE_DARK }}>{yogurtIngredient ? `${yogurtIngredient.stock} ${yogurtIngredient.unit}` : '—'}</strong>
+            </span>
+          </div>
+          <div>
+            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 6 }}>Milk Used ({milkIngredient?.unit || 'Litre'})</label>
+            <input type="number" step="any" min="0" required autoFocus value={yogurtMilkAmount} onChange={e => setYogurtMilkAmount(e.target.value)} placeholder="e.g. 5" style={dateInputStyle} onFocus={dateInputFocus} onBlur={dateInputBlur} />
+          </div>
+          <div>
+            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 6 }}>Yogurt Added (grams)</label>
+            <input type="number" step="any" min="0" required value={yogurtAmount} onChange={e => setYogurtAmount(e.target.value)} placeholder="e.g. 4500" style={dateInputStyle} onFocus={dateInputFocus} onBlur={dateInputBlur} />
+          </div>
+          <div>
+            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 6 }}>Date</label>
+            <input type="date" required value={yogurtDate} onChange={e => setYogurtDate(e.target.value)} style={dateInputStyle} onFocus={dateInputFocus} onBlur={dateInputBlur} />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 8 }}>
+            <button type="button" onClick={() => setShowYogurtModal(false)} style={{ padding: '10px 16px', background: '#FFFFFF', color: '#6B7280', borderRadius: 8, border: '1.5px solid #E5E9F0', fontWeight: 600, fontSize: 14, cursor: 'pointer' }}>Cancel</button>
+            <button type="submit" style={{ padding: '10px 18px', background: BLUE, color: '#FFF', borderRadius: 8, border: 'none', fontWeight: 600, fontSize: 14, cursor: 'pointer', boxShadow: '0 4px 10px rgba(27,76,130,0.28)' }}>Convert</button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Report Waste Modal */}
+      <Modal isOpen={showWasteModal} onClose={() => setShowWasteModal(false)} title="Report Waste" width={440}>
+        <form onSubmit={handleWasteSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div>
+            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 6 }}>Ingredient</label>
+            <select
+              required
+              value={wasteIngredientId}
+              onChange={e => setWasteIngredientId(e.target.value)}
+              style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #E5E9F0', borderRadius: 8, fontSize: 14, background: '#F7F9FC', color: '#0F1720', outline: 'none', boxSizing: 'border-box' }}
+            >
+              {ingredients.map(ing => (
+                <option key={ing.id} value={ing.id}>{ing.name} ({ing.stock} {ing.unit} in stock)</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 6 }}>Amount Wasted</label>
+            <input type="number" step="any" min="0" required value={wasteAmount} onChange={e => setWasteAmount(e.target.value)} placeholder="e.g. 2" style={dateInputStyle} onFocus={dateInputFocus} onBlur={dateInputBlur} />
+          </div>
+          <div>
+            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 6 }}>Date</label>
+            <input type="date" required value={wasteDate} onChange={e => setWasteDate(e.target.value)} style={dateInputStyle} onFocus={dateInputFocus} onBlur={dateInputBlur} />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 8 }}>
+            <button type="button" onClick={() => setShowWasteModal(false)} style={{ padding: '10px 16px', background: '#FFFFFF', color: '#6B7280', borderRadius: 8, border: '1.5px solid #E5E9F0', fontWeight: 600, fontSize: 14, cursor: 'pointer' }}>Cancel</button>
+            <button type="submit" style={{ padding: '10px 18px', background: '#B91C1C', color: '#FFF', borderRadius: 8, border: 'none', fontWeight: 600, fontSize: 14, cursor: 'pointer', boxShadow: '0 4px 10px rgba(185,28,28,0.28)' }}>Report Waste</button>
+          </div>
+        </form>
+      </Modal>
       {dialog}
     </div>
   );
