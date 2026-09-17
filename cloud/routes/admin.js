@@ -109,6 +109,26 @@ router.post('/clear-data', requireUser, async (req, res) => {
         counts[table] = (await client.query(del)).rowCount;
       }
 
+      /*
+       * Milk and Yogurt/Dahi come back at 0 rather than being left absent.
+       *
+       * Mirrors backend/db/database.js's own seed migrations on the till —
+       * those two ingredients are load-bearing (Dahi's recipe and the
+       * Convert-to-Yogurt feature both reference them by name), and a fresh
+       * or newly-cleared install should look the same whichever side you
+       * look at it from: not "no ingredients," but "Milk and Yogurt, empty."
+       * `local_id` pinned to 1 and 3 to match the till's own ids for these
+       * two — see that migration's comments — so the till's next push
+       * lands on these same rows instead of creating duplicates.
+       */
+      await client.query(`
+        INSERT INTO ingredients (branch_id, local_id, name, unit, stock, low_stock_threshold, cost_per_unit, received_at)
+        VALUES
+          (1, 1, 'Milk', 'Litre', 0, 0, 0, $1),
+          (1, 3, 'Yogurt', 'grams', 0, 0, 0, $1)
+        ON CONFLICT (branch_id, local_id) DO NOTHING
+      `, [Date.now()]);
+
       return {
         cleared: counts,
         backup: {
