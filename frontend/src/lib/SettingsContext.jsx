@@ -34,6 +34,15 @@ const DEFAULTS = {
   show_order_number: 'true',
   show_payment: 'true',
   paper_size: '80mm',
+  // 'html' (default): the existing window.print() → OS print dialog path.
+  // 'escpos': raw ESC/POS bytes sent straight to escpos_printer's Windows
+  // spooler in RAW mode, bypassing Chromium's page layout entirely — see
+  // electron/escpos-receipt.js and electron/print-raw-windows.js. Added
+  // because some thermal drivers (e.g. the BlackCopper BC-87AC) don't
+  // reliably honor the custom @page size the HTML path relies on, which
+  // shows up as blank paper feeding before or between copies.
+  print_mode: 'html',
+  escpos_printer: '',
 };
 
 export function SettingsProvider({ children }) {
@@ -120,6 +129,8 @@ function buildValue(raw, loading, refresh) {
     showOrderNumber: raw.show_order_number !== 'false',
     showPayment: raw.show_payment !== 'false',
     paperSize: raw.paper_size || '80mm',
+    printMode: raw.print_mode === 'escpos' ? 'escpos' : 'html',
+    escposPrinter: raw.escpos_printer || '',
   };
 }
 

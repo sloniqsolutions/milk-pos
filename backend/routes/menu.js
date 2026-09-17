@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db/database');
+const { cascadeUniversalPricing, derivedPriceFor } = require('../db/menu-pricing');
 // No cloud sync here on purpose: the cloud owns the menu outright (a till
 // only ever pulls it, via cloud/routes/menu.js's version-poll/snapshot
 // downlink) and the ingest API has no path for a till to push a menu change
@@ -63,9 +64,13 @@ router.post('/', (req, res) => {
 
   try {
     const createItem = db.transaction(() => {
-      const dbPrice = hasVariants ? 0 : Number(price);
+      // A sized Milk/Dahi item (e.g. "1.5 Litre", "250g") always prices off
+      // the universal item ("1 Litre" / "Dahi") rather than whatever was
+      // typed — see db/menu-pricing.js.
+      const derived = hasVariants ? null : derivedPriceFor(category, name);
+      const dbPrice = hasVariants ? 0 : (derived != null ? derived : Number(price));
       const dbHasVariants = hasVariants ? 1 : 0;
-      
+
       const result = db.prepare(
         'INSERT INTO menu_items (name, category, price, image_url, has_variants, description) VALUES (?, ?, ?, ?, ?, ?)'
       ).run(name, category, dbPrice, image_url || null, dbHasVariants, description || null);
@@ -126,9 +131,10 @@ router.put('/:id', (req, res) => {
 
   try {
     const updateItem = db.transaction(() => {
-      const dbPrice = hasVariants ? 0 : Number(price);
+      const derived = hasVariants ? null : derivedPriceFor(category, name);
+      const dbPrice = hasVariants ? 0 : (derived != null ? derived : Number(price));
       const dbHasVariants = hasVariants ? 1 : 0;
-      
+
       db.prepare(
         'UPDATE menu_items SET name = ?, category = ?, price = ?, image_url = ?, has_variants = ?, description = ? WHERE id = ?'
       ).run(name, category, dbPrice, image_url || null, dbHasVariants, description || null, id);
@@ -147,6 +153,9 @@ router.put('/:id', (req, res) => {
     updateItem();
 
     const updatedItem = db.prepare('SELECT * FROM menu_items WHERE id = ?').get(id);
+    // If this was the "1 Litre" or "Dahi" universal-price item, every other
+    // sized item in that category is re-priced off it — see db/menu-pricing.js.
+    cascadeUniversalPricing(updatedItem);
     if (updatedItem.has_variants) {
       updatedItem.variants = db.prepare('SELECT id, label, price, sort_order FROM item_variants WHERE menu_item_id = ? ORDER BY sort_order').all(id);
     } else {

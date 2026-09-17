@@ -12,4 +12,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // was refused — the renderer shows an in-app card matching the rest of the
   // till instead. See ElectronCloseGuard.jsx.
   onCloseBlockedShiftOpen: (callback) => ipcRenderer.on('close-blocked-shift-open', callback),
+
+  // Raw ESC/POS receipt printing — see electron/escpos-receipt.js and
+  // electron/print-raw-windows.js. Used by ReceiptModal.jsx when Settings →
+  // Printer has "Direct ESC/POS" selected; falls back to window.print()
+  // otherwise or if either of these calls fails.
+  listPrinters: () => ipcRenderer.invoke('list-printers'),
+  printEscPos: (payload) => ipcRenderer.invoke('print-escpos', payload),
 });

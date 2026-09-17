@@ -555,6 +555,56 @@ try {
   console.error('Migration for Yogurt ingredient failed:', e.message);
 }
 
+// Migration: seed the 'Dahi' menu item and tie it to the Yogurt ingredient
+// via a recipe, the same way the 3 milk items are tied to Milk. Its price is
+// per KILOGRAM: recipe_ingredients.quantity_required is 1000 (grams), so
+// buying "quantity" 0.25 of this item is 250g — same convention Milk uses for
+// fractional litres — and a sale is refused the same way a milk sale is if
+// Yogurt stock in db/routes/orders.js's stock check comes up short.
+try {
+  const done = db.prepare("SELECT value FROM settings WHERE key = 'migration_dahi_item_v1'").get();
+  if (!done) {
+    db.transaction(() => {
+      let yogurtIng = db.prepare("SELECT id FROM ingredients WHERE name = 'Yogurt'").get();
+      if (!yogurtIng) {
+        const res = db.prepare(
+          "INSERT INTO ingredients (name, unit, stock, cost_per_unit, low_stock_threshold) VALUES ('Yogurt', 'grams', 0, 0, 0)"
+        ).run();
+        yogurtIng = { id: res.lastInsertRowid };
+      }
+
+      let item = db.prepare("SELECT id FROM menu_items WHERE name = 'Dahi'").get();
+      let itemId;
+      if (!item) {
+        const res = db.prepare(
+          "INSERT INTO menu_items (name, category, price, has_variants, description, active) VALUES ('Dahi', 'Dahi', 300, 0, 'Fresh yogurt, made in-house from milk', 1)"
+        ).run();
+        itemId = res.lastInsertRowid;
+      } else {
+        itemId = item.id;
+      }
+
+      const existingRecipe = db.prepare("SELECT id FROM recipes WHERE menu_item_id = ?").get(itemId);
+      let recipeId;
+      if (!existingRecipe) {
+        recipeId = db.prepare("INSERT INTO recipes (menu_item_id, variant_id) VALUES (?, NULL)").run(itemId).lastInsertRowid;
+      } else {
+        recipeId = existingRecipe.id;
+        db.prepare("DELETE FROM recipe_ingredients WHERE recipe_id = ?").run(recipeId);
+      }
+
+      db.prepare(
+        "INSERT INTO recipe_ingredients (recipe_id, ingredient_id, quantity_required) VALUES (?, ?, 1000)"
+      ).run(recipeId, yogurtIng.id);
+
+      db.prepare("INSERT INTO settings (key, value) VALUES ('migration_dahi_item_v1', '1') ON CONFLICT(key) DO UPDATE SET value = '1'").run();
+    })();
+    console.log('Dahi menu item migration applied successfully.');
+  }
+} catch (e) {
+  console.error('Migration for Dahi menu item failed:', e.message);
+}
+
 // ─── Auto Backup ────────────────────────────────────────────────────────────
 const backupDir = path.join(userDataDir, 'backups');
 if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });

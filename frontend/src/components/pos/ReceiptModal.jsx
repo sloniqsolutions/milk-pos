@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'react';
 import { X, Printer } from 'lucide-react';
 import Receipt, { COPY_TYPES } from './Receipt';
 import { useSettings } from '@/lib/SettingsContext';
+import { buildEscPosCopies } from '@/lib/escpos-payload';
 
 const COPY_TABS = [
   { value: 'all', label: 'Both Copies' },
@@ -38,7 +39,40 @@ function nextPaint() {
 
 export default function ReceiptModal({ open, onClose, orderData, autoPrintEnabled = true }) {
   const [selection, setSelection] = useState('all');
-  const { autoPrint, paperSize } = useSettings();
+  const settings = useSettings();
+  const { autoPrint, paperSize, printMode, escposPrinter } = settings;
+
+  /**
+   * The ESC/POS path — see electron/escpos-receipt.js and
+   * electron/print-raw-windows.js for why this exists at all (the BC-87AC's
+   * driver doesn't reliably honor the HTML path's custom @page size, which
+   * shows up as blank paper before/between copies). Only attempted when
+   * Settings → Printer has it turned on and a printer chosen, and only
+   * available inside the Electron app (window.electronAPI). Returns whether
+   * it succeeded — false means the caller should fall back to window.print().
+   */
+  const printViaEscPos = async (copyTypes) => {
+    if (printMode !== 'escpos') return false;
+    if (!escposPrinter) return false;
+    if (typeof window === 'undefined' || !window.electronAPI?.printEscPos) return false;
+
+    try {
+      const copies = buildEscPosCopies(orderData, copyTypes, settings);
+      const result = await window.electronAPI.printEscPos({
+        printerName: escposPrinter,
+        paperWidthMm: paperSize === '58mm' ? 58 : 80,
+        copies,
+      });
+      if (!result?.success) {
+        console.error('ESC/POS print failed, falling back to browser print:', result?.error);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.error('ESC/POS print failed, falling back to browser print:', err);
+      return false;
+    }
+  };
 
   const writePageSize = (pageMm, heightMm) => {
     let tag = document.getElementById('receipt-page-size');
@@ -156,10 +190,13 @@ export default function ReceiptModal({ open, onClose, orderData, autoPrintEnable
     // there is no separate arbitrary delay here to be wrong about on a slow
     // machine.
     let cancelled = false;
-    const copyCount = (selection === 'all' ? COPY_TYPES : [selection]).length;
+    const copyTypes = selection === 'all' ? COPY_TYPES : [selection];
     const itemCount = (orderData?.items || []).length;
-    sizePageToReceipt(copyCount, itemCount).then(() => {
-      if (!cancelled) window.print();
+    printViaEscPos(copyTypes).then((printed) => {
+      if (cancelled || printed) return;
+      sizePageToReceipt(copyTypes.length, itemCount).then(() => {
+        if (!cancelled) window.print();
+      });
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -170,6 +207,8 @@ export default function ReceiptModal({ open, onClose, orderData, autoPrintEnable
   const copiesToPrint = selection === 'all' ? COPY_TYPES : [selection];
 
   const handlePrint = async () => {
+    const printed = await printViaEscPos(copiesToPrint);
+    if (printed) return;
     await sizePageToReceipt(copiesToPrint.length, (orderData?.items || []).length);
     window.print();
   };

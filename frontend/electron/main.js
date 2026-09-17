@@ -3,6 +3,8 @@ const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const http = require('http');
+const { buildReceiptBuffer } = require('./escpos-receipt');
+const { printRawBuffer } = require('./print-raw-windows');
 
 let mainWindow;
 let backendProcess;
@@ -291,6 +293,41 @@ if (!gotTheLock) {
     });
     mainWindow.on('closed', () => { mainWindow = null; });
   }
+
+  /**
+   * Real Windows printer names, for Settings → Printer's ESC/POS dropdown.
+   * The same list the OS print dialog itself offers, so whatever name is
+   * picked here is guaranteed to be one print-raw-windows.js can open.
+   */
+  ipcMain.handle('list-printers', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+    if (!win) return [];
+    try {
+      const printers = await win.webContents.getPrintersAsync();
+      return printers.map((p) => ({ name: p.name, isDefault: !!p.isDefault }));
+    } catch (err) {
+      log('[Main] list-printers failed: ' + err.message);
+      return [];
+    }
+  });
+
+  /**
+   * The ESC/POS print path — see escpos-receipt.js and print-raw-windows.js
+   * for why this exists. `copies` and `paperWidthMm` are pre-formatted by
+   * ReceiptModal.jsx from the same order data and settings the HTML receipt
+   * uses, so this handler is pure plumbing: build the byte stream, hand it to
+   * the printer's Windows spooler in RAW mode.
+   */
+  ipcMain.handle('print-escpos', async (event, { printerName, paperWidthMm, copies }) => {
+    try {
+      const buffer = buildReceiptBuffer(copies || [], paperWidthMm === 58 ? 58 : 80);
+      await printRawBuffer(buffer, printerName);
+      return { success: true };
+    } catch (err) {
+      log('[Main] print-escpos failed: ' + err.message);
+      return { success: false, error: err.message };
+    }
+  });
 
   ipcMain.on('shift-check-response', (event, hasOpenShift) => {
     if (!mainWindow) return;

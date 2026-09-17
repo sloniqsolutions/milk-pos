@@ -104,6 +104,23 @@ export default function Settings() {
   const [printerType, setPrinterType] = useState('USB');
   const [printerIP, setPrinterIP] = useState('');
 
+  // Print mode — 'html' is the existing window.print() path; 'escpos' sends
+  // raw commands straight to a Windows printer's spooler (see
+  // electron/print-raw-windows.js), for thermal printers whose driver
+  // doesn't honor the HTML path's custom page size. availablePrinters comes
+  // from Electron's own printer list, so the name picked here is guaranteed
+  // valid — not in Electron (e.g. the dashboard reusing this screen), it
+  // stays empty and the toggle below is disabled.
+  const [printerSettings, setPrinterSettings] = useState({ printMode: 'html', escposPrinter: '' });
+  const [availablePrinters, setAvailablePrinters] = useState([]);
+  const [testPrinting, setTestPrinting] = useState(false);
+  const hasElectronPrinting = typeof window !== 'undefined' && !!window.electronAPI?.printEscPos;
+
+  useEffect(() => {
+    if (!hasElectronPrinting) return;
+    window.electronAPI.listPrinters().then(setAvailablePrinters).catch(() => setAvailablePrinters([]));
+  }, [hasElectronPrinting]);
+
   /**
    * FIX (Bug 5): shift state used to be pure fiction — `shiftOrders = 23`,
    * `shiftRevenue = 12400` and three invented history rows that lived only in
@@ -249,6 +266,10 @@ export default function Settings() {
         showPayment: data.show_payment !== 'false',
         paperSize: data.paper_size || '80mm',
       });
+      setPrinterSettings({
+        printMode: data.print_mode === 'escpos' ? 'escpos' : 'html',
+        escposPrinter: data.escpos_printer || '',
+      });
       if (data.last_backup) setLastBackup(data.last_backup);
     }).catch(() => {});
   }, []);
@@ -330,6 +351,60 @@ export default function Settings() {
       refreshSettings();
     } catch (err) {
       setToast({ message: err.message || 'Could not save receipt settings', type: 'error' });
+    }
+  };
+
+  const updatePrinterSetting = async (patch) => {
+    const next = { ...printerSettings, ...patch };
+    setPrinterSettings(next);
+    try {
+      await settingsAPI.update({
+        print_mode: next.printMode,
+        escpos_printer: next.escposPrinter,
+      });
+      refreshSettings();
+    } catch (err) {
+      setToast({ message: err.message || 'Could not save printer settings', type: 'error' });
+    }
+  };
+
+  const handleTestPrint = async () => {
+    if (printerSettings.printMode === 'escpos') {
+      if (!printerSettings.escposPrinter) {
+        setToast({ message: 'Choose a printer first.', type: 'error' });
+        return;
+      }
+      setTestPrinting(true);
+      try {
+        const result = await window.electronAPI.printEscPos({
+          printerName: printerSettings.escposPrinter,
+          paperWidthMm: receiptSettings.paperSize === '58mm' ? 58 : 80,
+          copies: [{
+            copyLabel: null,
+            shopName: profile.name || 'Pure Milk',
+            tagline: profile.tagline,
+            addressLine: [profile.address, profile.phone].filter(Boolean).join(' · '),
+            metaLeft: [`Date: ${new Date().toLocaleDateString()}`, `Time: ${new Date().toLocaleTimeString()}`],
+            metaRight: ['Test Print'],
+            customer: null,
+            items: [{ name: 'Test Item', qty: 'x1', amount: formatMoney(0) }],
+            totalsLines: [{ label: 'Subtotal', value: formatMoney(0) }],
+            total: { label: 'TOTAL', value: formatMoney(0) },
+            footerMessage: 'This is a test print.',
+          }],
+        });
+        if (result?.success) {
+          setToast({ message: 'Test print sent.', type: 'success' });
+        } else {
+          setToast({ message: result?.error || 'Test print failed.', type: 'error' });
+        }
+      } catch (err) {
+        setToast({ message: err.message || 'Test print failed.', type: 'error' });
+      } finally {
+        setTestPrinting(false);
+      }
+    } else {
+      window.print();
     }
   };
 
@@ -632,46 +707,97 @@ export default function Settings() {
   const renderPrinter = () => (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
       <div>
-        <FieldLabel label="Printer Type" />
+        <FieldLabel label="Print Mode" />
         <SegmentedButton
-          options={[{ value: 'USB', label: 'USB' }, { value: 'Network', label: 'Network' }, { value: 'Bluetooth', label: 'Bluetooth' }]}
-          value={printerType}
-          onChange={setPrinterType}
+          options={[
+            { value: 'html', label: 'Browser Print Dialog' },
+            { value: 'escpos', label: 'Direct ESC/POS (Recommended)' },
+          ]}
+          value={printerSettings.printMode}
+          onChange={(v) => updatePrinterSetting({ printMode: v })}
         />
+        <div style={{ fontSize: 12.5, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
+          {printerSettings.printMode === 'escpos'
+            ? "Sends the receipt straight to the printer's own command language, bypassing Windows' page-layout printing entirely. Fixes blank paper feeding before or between copies on thermal printers whose driver doesn't honor a custom page size — including the BlackCopper BC-87AC."
+            : "Uses your computer's normal print dialog. Works with any installed printer, but some thermal drivers substitute their own default paper size instead of the receipt's actual size, which can feed blank paper first."}
+        </div>
       </div>
-      {printerType === 'Network' && (
+
+      {printerSettings.printMode === 'escpos' && (
+        !hasElectronPrinting ? (
+          <div style={{
+            display: 'flex', alignItems: 'flex-start', gap: 10,
+            background: '#FEF3C7', border: '1px solid #FDE68A',
+            borderRadius: 8, padding: 12,
+          }}>
+            <Printer size={16} color="#92400E" style={{ marginTop: 1, flexShrink: 0 }} />
+            <div style={{ fontSize: 13, color: '#92400E', lineHeight: 1.5 }}>
+              Direct ESC/POS printing is only available in the installed till app, not this browser tab.
+            </div>
+          </div>
+        ) : (
+          <div>
+            <FieldLabel label="Printer" />
+            <select
+              style={{ ...INPUT_STYLE, width: 280 }}
+              value={printerSettings.escposPrinter}
+              onChange={(e) => updatePrinterSetting({ escposPrinter: e.target.value })}
+            >
+              <option value="">Choose a printer…</option>
+              {availablePrinters.map((p) => (
+                <option key={p.name} value={p.name}>{p.name}{p.isDefault ? ' (Windows default)' : ''}</option>
+              ))}
+            </select>
+            {availablePrinters.length === 0 && (
+              <div style={{ fontSize: 12.5, color: '#9CA3AF', marginTop: 6 }}>
+                No printers found. Install the BC-87AC in Windows first, then reopen this screen.
+              </div>
+            )}
+          </div>
+        )
+      )}
+
+      {printerSettings.printMode === 'html' && (
         <div>
-          <FieldLabel label="Printer IP Address" />
-          <input style={{ ...INPUT_STYLE, width: 200 }} placeholder="192.168.1.100" value={printerIP} onChange={(e) => setPrinterIP(e.target.value)} />
+          <FieldLabel label="Printer Type" />
+          <SegmentedButton
+            options={[{ value: 'USB', label: 'USB' }, { value: 'Network', label: 'Network' }, { value: 'Bluetooth', label: 'Bluetooth' }]}
+            value={printerType}
+            onChange={setPrinterType}
+          />
+          {printerType === 'Network' && (
+            <div style={{ marginTop: 12 }}>
+              <FieldLabel label="Printer IP Address" />
+              <input style={{ ...INPUT_STYLE, width: 200 }} placeholder="192.168.1.100" value={printerIP} onChange={(e) => setPrinterIP(e.target.value)} />
+            </div>
+          )}
+          <div style={{
+            display: 'flex', alignItems: 'flex-start', gap: 10, marginTop: 12,
+            background: '#FEE2E2', border: '1px solid #FCA5A5',
+            borderRadius: 8, padding: 12,
+          }}>
+            <Printer size={16} color="#92400E" style={{ marginTop: 1, flexShrink: 0 }} />
+            <div style={{ fontSize: 13, color: '#92400E', lineHeight: 1.5 }}>
+              Receipts print through your computer's print dialog, so any printer
+              installed in Windows will work — including USB and network thermal
+              printers. Set your receipt printer as the Windows default and choose
+              the matching paper size in the Receipt tab.
+            </div>
+          </div>
         </div>
       )}
-      {/* FIX (Bug 5): this used to be a status dot driven by `printerConnected`,
-          a state variable that was never once set to true — so it permanently
-          read "No Printer Found" regardless of your actual setup. Pure Milk POS
-          prints through the operating system's own print dialog, so there is
-          no connection to detect. Replaced with an accurate explanation. */}
-      <div style={{
-        display: 'flex', alignItems: 'flex-start', gap: 10,
-        background: '#FEE2E2', border: '1px solid #FCA5A5',
-        borderRadius: 8, padding: 12,
-      }}>
-        <Printer size={16} color="#92400E" style={{ marginTop: 1, flexShrink: 0 }} />
-        <div style={{ fontSize: 13, color: '#92400E', lineHeight: 1.5 }}>
-          Receipts print through your computer's print dialog, so any printer
-          installed in Windows will work — including USB and network thermal
-          printers. Set your receipt printer as the Windows default and choose
-          the matching paper size above.
-        </div>
-      </div>
+
       <button
-        onClick={() => window.print()}
+        onClick={handleTestPrint}
+        disabled={testPrinting}
         className="flex items-center gap-2"
         style={{
           background: '#FFFFFF', border: '1px solid #DC2626', color: '#DC2626',
-          height: 40, borderRadius: 8, fontWeight: 600, fontSize: 14, padding: '0 20px', cursor: 'pointer',
+          height: 40, borderRadius: 8, fontWeight: 600, fontSize: 14, padding: '0 20px',
+          cursor: testPrinting ? 'default' : 'pointer', opacity: testPrinting ? 0.6 : 1,
         }}
       >
-        <Printer size={16} /> Send Test Print
+        <Printer size={16} /> {testPrinting ? 'Sending…' : 'Send Test Print'}
       </button>
     </div>
   );

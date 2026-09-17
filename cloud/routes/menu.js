@@ -28,6 +28,7 @@ const router = express.Router();
 const db = require('../db/pg');
 const { requireUser } = require('../middleware/session');
 const { requireBranch } = require('../middleware/branch-auth');
+const { cascadeUniversalPricing, derivedPriceFor } = require('../db/menu-pricing');
 
 const num = (v) => (v == null || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
 const str = (v) => (v == null ? null : String(v));
@@ -82,10 +83,16 @@ router.post('/', requireUser, async (req, res) => {
 
   try {
     const result = await db.tx(async (client) => {
+      // A sized Milk/Dahi item (e.g. "1.5 Litre", "250g") always prices off
+      // the universal item ("1 Litre" / "Dahi") rather than whatever was
+      // submitted — see db/menu-pricing.js.
+      const derived = has_variants ? null : await derivedPriceFor(client, str(category), str(name));
+      const itemPrice = derived != null ? derived : (num(price) || 0);
+
       const item = await client.query(`
         INSERT INTO menu_items (name, category, price, image_url, has_variants, description, active)
         VALUES ($1, $2, $3, $4, $5, $6, 1) RETURNING *
-      `, [str(name), str(category), num(price) || 0, str(image_url),
+      `, [str(name), str(category), itemPrice, str(image_url),
           has_variants ? 1 : 0, str(description)]);
 
       const id = item.rows[0].id;
@@ -109,6 +116,15 @@ router.put('/:id', requireUser, async (req, res) => {
   const { name, category, price, description, has_variants, variants, active, image_url } = req.body || {};
   try {
     const result = await db.tx(async (client) => {
+      // Same rule as creation: a sized Milk/Dahi item's price always derives
+      // from the universal item, overriding whatever was submitted, as long
+      // as this request actually names the item (the usual case — the Menu
+      // screen always sends name+category+price together).
+      const derived = (!has_variants && name && category)
+        ? await derivedPriceFor(client, str(category), str(name))
+        : null;
+      const effectivePrice = derived != null ? derived : num(price);
+
       const item = await client.query(`
         UPDATE menu_items SET
           name = COALESCE($1, name),
@@ -119,7 +135,7 @@ router.put('/:id', requireUser, async (req, res) => {
           description = COALESCE($6, description),
           active = COALESCE($7, active)
         WHERE id = $8 RETURNING *
-      `, [str(name), str(category), num(price), str(image_url),
+      `, [str(name), str(category), effectivePrice, str(image_url),
           has_variants == null ? null : (has_variants ? 1 : 0),
           str(description), active == null ? null : (active ? 1 : 0), req.params.id]);
 
@@ -135,6 +151,9 @@ router.put('/:id', requireUser, async (req, res) => {
             [req.params.id, str(v.label), num(v.price) || 0, num(v.sort_order) ?? i]);
         }
       }
+      // If this was the "1 Litre" or "Dahi" universal-price item, every other
+      // sized item in that category is re-priced off it — see db/menu-pricing.js.
+      await cascadeUniversalPricing(client, item.rows[0]);
       const version = await bumpVersion(client);
       return { ...item.rows[0], menu_version: version };
     });

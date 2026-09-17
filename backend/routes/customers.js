@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../db/database');
 const { syncUpsert } = require('../db/cloud-sync');
 const { getCustomerSummary } = require('../db/customer-summary');
+const { getLitresByOrderIds } = require('../db/order-litres');
 
 // Whitelisted so a bad ?sort= value can't be used to inject SQL — same
 // reasoning as VALID_PAYMENTS in orders.js.
@@ -48,9 +49,16 @@ router.get('/', (req, res) => {
         GROUP BY customer_id
       ) payment_total ON payment_total.customer_id = c.id
       LEFT JOIN (
-        SELECT o.customer_id, SUM(oi.quantity) as litres
+        -- Real milk litres, not order_items.quantity itself — see
+        -- db/order-litres.js's docstring for why those differ once more than
+        -- one milk pack size exists (a "2 Litre" pack is quantity 1).
+        SELECT o.customer_id, SUM(oi.quantity * ri.quantity_required) as litres
         FROM orders o
         JOIN order_items oi ON oi.order_id = o.id
+        JOIN recipes r ON r.menu_item_id = oi.menu_item_id
+          AND (r.variant_id = oi.variant_id OR r.variant_id IS NULL)
+        JOIN recipe_ingredients ri ON ri.recipe_id = r.id
+        JOIN ingredients ing ON ing.id = ri.ingredient_id AND ing.name = 'Milk'
         WHERE o.payment_method = 'Credit' AND o.status = 'completed' AND o.customer_id IS NOT NULL
         GROUP BY o.customer_id
       ) litre_total ON litre_total.customer_id = c.id
@@ -95,7 +103,7 @@ router.get('/:id', (req, res) => {
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
   const creditOrders = db.prepare(
-    `SELECT id, total, created_at, status FROM orders
+    `SELECT id, total, created_at, status, cashier_id, cashier_name FROM orders
      WHERE customer_id = ? AND payment_method = 'Credit'
      ORDER BY created_at DESC`
   ).all(req.params.id);
@@ -110,19 +118,14 @@ router.get('/:id', (req, res) => {
   const totalPaid = payments.reduce((sum, p) => sum + p.amount, 0);
 
   // --- Litres + monthly breakdown ---
-  // Single-product shop: order_items.quantity on a credit order IS the litres.
+  // Real milk litres per order (see db/order-litres.js) — order_items.quantity
+  // alone is not litres once packs of different sizes exist (a "2 Litre" pack
+  // is quantity 1, not 2).
   let totalLitres = 0;
   const monthly = {}; // 'YYYY-MM' -> { litres, amount }
 
   if (completedOrders.length > 0) {
-    const ids = completedOrders.map(o => o.id);
-    const placeholders = ids.map(() => '?').join(',');
-    const litreRows = db.prepare(
-      `SELECT order_id, SUM(quantity) as litres FROM order_items
-       WHERE order_id IN (${placeholders}) GROUP BY order_id`
-    ).all(...ids);
-    const litresByOrder = {};
-    litreRows.forEach(r => { litresByOrder[r.order_id] = r.litres; });
+    const litresByOrder = getLitresByOrderIds(completedOrders.map(o => o.id));
 
     completedOrders.forEach(o => {
       const litres = litresByOrder[o.id] || 0;

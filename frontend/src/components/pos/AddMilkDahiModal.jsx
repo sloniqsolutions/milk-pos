@@ -60,7 +60,12 @@ export default function AddMilkDahiModal({ isOpen, onClose, onAdd }) {
   // db/database.js); 1 for Milk, whose menu unit already is 1 litre.
   const unitSize = product === 'Milk' ? 1 : 1000;
   const unitLabel = product === 'Milk' ? 'Litres' : 'Grams';
-  const rate = item ? item.price / unitSize : 0; // price per litre, or per gram
+  // Price per item-UNIT (per litre for Milk, per kg for Dahi) — the menu
+  // price already means that, so this is just item.price. qty below is what
+  // carries the unitSize conversion; dividing rate by unitSize too (as this
+  // used to) double-counted it — 500g at Rs 300/kg came out to Rs 0.15
+  // instead of Rs 150.
+  const rate = item ? item.price : 0;
 
   const amountNum = Number(amount) || 0;
   const priceNum = Number(price) || 0;

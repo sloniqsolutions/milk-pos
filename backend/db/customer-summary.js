@@ -1,4 +1,5 @@
 const db = require('./database');
+const { getTotalLitres } = require('./order-litres');
 
 /**
  * A credit customer's full standing — balance, lifetime litres and totals —
@@ -31,15 +32,9 @@ function getCustomerSummary(customerId) {
   const totalCredited = completedOrders.reduce((sum, o) => sum + o.total, 0);
   const totalPaid = payments.reduce((sum, p) => sum + p.amount, 0);
 
-  let totalLitres = 0;
-  if (completedOrders.length > 0) {
-    const ids = completedOrders.map(o => o.id);
-    const placeholders = ids.map(() => '?').join(',');
-    const litreRows = db.prepare(
-      `SELECT SUM(quantity) as litres FROM order_items WHERE order_id IN (${placeholders})`
-    ).get(...ids);
-    totalLitres = litreRows.litres || 0;
-  }
+  const totalLitres = completedOrders.length > 0
+    ? getTotalLitres(completedOrders.map(o => o.id))
+    : 0;
 
   // creditOrders is newest-first, so after filtering the same order holds:
   // index 0 is the most recent completed order, the last index is the oldest.
