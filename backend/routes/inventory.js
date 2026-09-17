@@ -5,9 +5,19 @@ const { syncUpsert } = require('../db/cloud-sync');
 
 const today = () => new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD, local time
 
-const recordEntry = db.prepare(
+const insertEntry = db.prepare(
   'INSERT INTO inventory_entries (ingredient_id, type, amount, entry_date) VALUES (?, ?, ?, ?)'
 );
+const getEntry = db.prepare('SELECT * FROM inventory_entries WHERE id = ?');
+
+/** Records a stock movement locally and pushes it to the cloud — the
+ * dashboard's own Stock History screen has nothing to show without this;
+ * see cloud/routes/inventory.js's /history route and db/schema.js's
+ * inventory_entries table. */
+function recordEntry(ingredientId, type, amount, entryDate) {
+  const id = insertEntry.run(ingredientId, type, amount, entryDate).lastInsertRowid;
+  syncUpsert('inventory_entries', getEntry.get(id));
+}
 
 // GET all ingredients
 router.get('/', (req, res) => {
@@ -38,7 +48,7 @@ router.post('/', (req, res) => {
     const startingStock = stock || 0;
     const result = insert.run(nextId, name, unit, startingStock, low_stock_threshold || 0);
     if (startingStock > 0) {
-      recordEntry.run(result.lastInsertRowid, 'stock', startingStock, date || today());
+      recordEntry(result.lastInsertRowid, 'stock', startingStock, date || today());
     }
     const newIngredient = db.prepare('SELECT * FROM ingredients WHERE id = ?').get(result.lastInsertRowid);
     syncUpsert('ingredients', newIngredient);
@@ -84,7 +94,7 @@ router.put('/:id/stock', (req, res) => {
     // what left the stock, not the bigger number that was typed in.
     const delta = newStock - ingredient.stock;
     if (delta !== 0) {
-      recordEntry.run(id, 'stock', delta, date || today());
+      recordEntry(id, 'stock', delta, date || today());
     }
 
     syncUpsert('ingredients', { ...ingredient, stock: newStock });
@@ -181,8 +191,8 @@ router.post('/convert-to-yogurt', (req, res) => {
     const convert = db.transaction(() => {
       db.prepare('UPDATE ingredients SET stock = ? WHERE id = ?').run(newMilkStock, milk.id);
       db.prepare('UPDATE ingredients SET stock = ? WHERE id = ?').run(newYogurtStock, yogurt.id);
-      recordEntry.run(milk.id, 'yogurt_conversion', -milkAmount, entryDate);
-      recordEntry.run(yogurt.id, 'yogurt_conversion', yogurtAmount, entryDate);
+      recordEntry(milk.id, 'yogurt_conversion', -milkAmount, entryDate);
+      recordEntry(yogurt.id, 'yogurt_conversion', yogurtAmount, entryDate);
     });
     convert();
 
@@ -223,7 +233,7 @@ router.post('/waste', (req, res) => {
 
     const reportWaste = db.transaction(() => {
       db.prepare('UPDATE ingredients SET stock = ? WHERE id = ?').run(newStock, ingredient.id);
-      recordEntry.run(ingredient.id, 'waste', -actualWaste, entryDate);
+      recordEntry(ingredient.id, 'waste', -actualWaste, entryDate);
     });
     reportWaste();
 

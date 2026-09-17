@@ -133,6 +133,8 @@ const CUSTOMER_COLS = [
   'first_order_at', 'last_order_at', 'total_credited', 'total_paid', 'balance',
   'total_litres',
 ];
+const CREDIT_PAYMENT_COLS = ['customer_local_id', 'local_shift_id', 'amount', 'note', 'received_by', 'created_at'];
+const INVENTORY_ENTRY_COLS = ['ingredient_local_id', 'type', 'amount', 'entry_date', 'created_at'];
 
 const ORDER_VALUES = (r) => [
   num(r.total), num(r.discount), str(r.payment_method), str(r.status),
@@ -290,6 +292,24 @@ const HANDLERS = {
     alwaysCols: ['order_count', 'total_spent', 'first_order_at', 'last_order_at', 'total_credited', 'total_paid', 'balance', 'total_litres'],
     gateCondition: "customers.origin <> 'cloud'",
   }, dropDeletedCustomers),
+
+  // The individual events behind a customer's balance — see db/schema.js's
+  // credit_payments table for why this exists (branch-data.js's shift
+  // totals need "collected during THIS shift", which a lifetime total_paid
+  // figure can't answer). Immutable once recorded — no edit/delete route
+  // anywhere touches a payment after the fact — so a plain upsert with no
+  // origin gating is enough; nothing on the dashboard ever writes here to
+  // conflict with.
+  credit_payments: simpleIngest('credit_payments', CREDIT_PAYMENT_COLS, r => [
+    num(r.customer_id), num(r.shift_id), num(r.amount), str(r.note), str(r.received_by), str(r.created_at),
+  ]),
+
+  // Restocks, Convert-to-Yogurt, waste — see db/schema.js's inventory_entries
+  // table. Immutable once recorded (no edit/delete route touches one after
+  // the fact), so a plain upsert is enough.
+  inventory_entries: simpleIngest('inventory_entries', INVENTORY_ENTRY_COLS, r => [
+    num(r.ingredient_id), str(r.type), num(r.amount), str(r.entry_date), str(r.created_at),
+  ]),
 };
 
 /**

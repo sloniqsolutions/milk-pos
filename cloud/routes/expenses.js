@@ -78,6 +78,40 @@ router.post('/', requireUser, async (req, res) => {
   }
 });
 
+/**
+ * DELETE /api/expenses/local/:localId — a till telling the cloud it just
+ * deleted one of its own expenses (see backend/routes/expenses.js's DELETE
+ * route, the only place that calls this). Same reasoning and same route-
+ * ordering note as cloud/routes/staff.js's identical /local/:localId route:
+ * registered before /:branchId/:localId below because both are two-segment
+ * paths and Express matches on registration order — "local" would otherwise
+ * be read as a branchId and this would 404/sign-in-fail instead of deleting.
+ */
+router.delete('/local/:localId', requireBranch, async (req, res) => {
+  const localId = Number(req.params.localId);
+  if (!Number.isFinite(localId)) return res.status(400).json({ error: 'Bad expense id.' });
+
+  try {
+    const version = await db.tx(async (client) => {
+      const existing = await client.query('SELECT description FROM expenses WHERE branch_id = $1 AND local_id = $2', [req.branch.id, localId]);
+
+      await client.query(`
+        INSERT INTO expense_deletions (branch_id, local_id, description, deleted_by)
+        VALUES ($1, $2, $3, 'till')
+        ON CONFLICT (branch_id, local_id) DO UPDATE SET
+          deleted_at = NOW(), description = EXCLUDED.description, deleted_by = EXCLUDED.deleted_by
+      `, [req.branch.id, localId, existing.rows[0] ? existing.rows[0].description : null]);
+
+      await client.query('DELETE FROM expenses WHERE branch_id = $1 AND local_id = $2', [req.branch.id, localId]);
+      return bumpVersion(client);
+    });
+
+    res.json({ success: true, expense_version: version });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.delete('/:branchId/:localId', requireUser, async (req, res) => {
   const branchId = Number(req.params.branchId);
   const localId = Number(req.params.localId);

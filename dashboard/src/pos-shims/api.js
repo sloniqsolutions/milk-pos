@@ -188,11 +188,15 @@ export const inventoryAPI = {
   updateStock: readOnly('Stock'),
   updateThreshold: (id, threshold) => request('PUT', `/inventory/1/${id}`, { low_stock_threshold: threshold }),
   delete: (id) => request('DELETE', `/inventory/1/${id}`),
-  // Stock history, yogurt conversion and waste reporting are till-only too —
-  // same reasoning as the rest of this object. Stubbed so InventoryScreen's
-  // buttons fail with the same explanatory message instead of a raw
-  // "not a function" when that shared screen renders on the dashboard.
-  history: () => Promise.resolve([]),
+  // Real read now — see cloud/routes/inventory.js's GET /history, and
+  // StockHistoryScreen.tsx (reused unaltered, same as InventoryScreen) in
+  // Shell.jsx's own 'stock-history' tab.
+  history: (params = {}) => request('GET', `/inventory/history${qs(params)}`),
+  // Yogurt conversion and waste reporting stay till-only — a physical event
+  // that happens at the shop, not something to log remotely. Stubbed so
+  // InventoryScreen's buttons fail with the same explanatory message instead
+  // of a raw "not a function" when that shared screen renders on the
+  // dashboard.
   convertToYogurt: readOnly('Stock'),
   reportWaste: readOnly('Stock'),
 };

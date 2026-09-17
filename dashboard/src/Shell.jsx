@@ -12,6 +12,7 @@ import ExpensesScreen from '@/pages/ExpensesScreen';
 import ShiftsScreen from '@/pages/ShiftsScreen';
 import Cashier from '@/pages/Cashier';
 import InventoryScreen from '@/pages/InventoryScreen';
+import StockHistoryScreen from '@/pages/StockHistoryScreen';
 import MenuManagement from '@/pages/MenuManagement';
 import SettingsScreen from './SettingsScreen';
 import OrdersScreen from './OrdersScreen';
@@ -37,6 +38,7 @@ const TABS = [
   // Wages live only here. Nothing on this tab is ever sent to a till.
   { key: 'payroll', label: 'Payroll', Screen: PayrollScreen },
   { key: 'inventory', label: 'Inventory', Screen: InventoryScreen },
+  { key: 'stock-history', label: 'Stock History', Screen: StockHistoryScreen },
   // The only ones the dashboard can change. Everything above is recorded at a
   // till and travels upward; the menu is the one thing that travels down.
   // (No Deals tab: Milk POS is a flat, three-SKU menu with no combo/bundle
@@ -55,10 +57,14 @@ const CLOUD_OWNED = new Set(['menu', 'settings', 'staff']);
  * Which tabs show only what the branches have sent, and cannot change it.
  *
  * Said once, plainly, rather than leaving someone to discover it by pressing a
- * button and getting an error. These things are recorded at the till and there
- * is no downlink for them — only the menu travels the other way.
+ * button and getting an error. Shifts and Stock History are recorded purely
+ * at the till with no path up at all. Expenses and Inventory used to belong
+ * here too, back when they were fully read-only — they're partially
+ * editable now (create/delete an expense, edit an ingredient's name/unit/
+ * threshold — see cloud/routes/expenses.js and inventory.js), so the blanket
+ * "cannot be changed from here" banner would just be wrong on those tabs now.
  */
-const READ_ONLY = new Set(['expenses', 'shifts', 'inventory']);
+const READ_ONLY = new Set(['shifts', 'stock-history']);
 
 export default function Shell({ user, onSignOut }) {
   const [tab, setTab] = useState('live');
@@ -105,11 +111,12 @@ export default function Shell({ user, onSignOut }) {
                   ))}
                 </nav>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
                 <span style={{ fontSize: 13, color: '#6B7280' }}>{user.email}</span>
                 <button onClick={onSignOut} style={{
                   border: '1px solid #E5E9F0', background: '#FFFFFF', borderRadius: 8,
                   padding: '6px 13px', fontSize: 13, fontWeight: 600, cursor: 'pointer', color: '#374151',
+                  flexShrink: 0, whiteSpace: 'nowrap',
                 }}>
                   Sign out
                 </button>

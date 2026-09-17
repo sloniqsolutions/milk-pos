@@ -41,6 +41,8 @@ const INGEST_TABLE = {
   ingredients: 'ingredients',
   staff: 'staff',
   customers: 'customers',
+  credit_payments: 'credit_payments',
+  inventory_entries: 'inventory_entries',
 };
 
 /** Splits a push into batches under ingest.js's MAX_ROWS (200). */
@@ -76,14 +78,12 @@ function syncUpsertMany(localTable, rows) {
 }
 
 /**
- * Deletion has no ingest counterpart. The only delete path in
- * cloud/routes/ingest.js runs the other way — the dashboard deletes a staff
- * member and the till's *next push* is refused from resurrecting them — and
- * nothing else is deletable via the ingest API at all. A local delete (an
- * expense corrected, a staff member removed at the till) therefore cannot be
- * pushed; this stays a documented, one-time-per-table warning rather than a
- * silent gap, so the row's continued presence on the dashboard is explained
- * rather than mysterious.
+ * Deletion has no ingest counterpart for whatever table this is still called
+ * for. Staff and expenses used to be in that bucket and now have their own
+ * real delete-sync functions below (syncStaffDelete, syncExpenseDelete) —
+ * this stays only for a table nobody has built one for yet, as a documented,
+ * one-time-per-table warning rather than a silent gap, so the row's
+ * continued presence on the dashboard is explained rather than mysterious.
  */
 const warnedDeletes = new Set();
 function syncDelete(localTable) {
@@ -110,6 +110,16 @@ function syncStaffDelete(localId) {
   if (!config) return;
   deleteJson(config.cloudUrl, `/api/staff/local/${localId}`, config.apiKey).catch((err) => {
     console.error('[Cloud] sync staff delete failed:', err.message);
+  });
+}
+
+/** Same as syncStaffDelete, for an expense — see cloud/routes/expenses.js's
+ * DELETE /local/:localId, the only thing this calls. */
+function syncExpenseDelete(localId) {
+  const config = readCloudConfig();
+  if (!config) return;
+  deleteJson(config.cloudUrl, `/api/expenses/local/${localId}`, config.apiKey).catch((err) => {
+    console.error('[Cloud] sync expense delete failed:', err.message);
   });
 }
 
@@ -145,6 +155,12 @@ function pushInitialBackfill() {
   const customers = customerIds.map(getCustomerSummary).filter(Boolean);
   pushBatches(config, 'customers', customers, 'customers (initial backfill)');
 
+  const creditPayments = db.prepare('SELECT * FROM credit_payments ORDER BY id').all();
+  pushBatches(config, 'credit_payments', creditPayments, 'credit payments (initial backfill)');
+
+  const inventoryEntries = db.prepare('SELECT * FROM inventory_entries ORDER BY id').all();
+  pushBatches(config, 'inventory_entries', inventoryEntries, 'inventory entries (initial backfill)');
+
   const shifts = db.prepare('SELECT * FROM shifts ORDER BY id').all();
   pushBatches(config, 'shifts', shifts, 'shifts (initial backfill)');
 
@@ -156,4 +172,4 @@ function pushInitialBackfill() {
   pushBatches(config, 'orders', orders, 'orders (initial backfill)');
 }
 
-module.exports = { syncUpsert, syncUpsertMany, syncDelete, syncStaffDelete, pushInitialBackfill };
+module.exports = { syncUpsert, syncUpsertMany, syncDelete, syncStaffDelete, syncExpenseDelete, pushInitialBackfill };

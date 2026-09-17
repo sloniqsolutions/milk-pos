@@ -241,6 +241,50 @@ CREATE TABLE IF NOT EXISTS customers (
 );
 CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
 
+-- One row per credit payment, pushed alongside the customer's recomputed
+-- balance (routes/customers.js's POST /:id/payments already sent the
+-- balance; this is the individual event behind it). Exists for exactly one
+-- reason: branch-data.js's shift totals need "cash collected from credit
+-- customers during THIS shift" and there is no way to derive that from a
+-- lifetime total_paid figure alone — a customer's balance going down by
+-- Rs.500 says nothing about which shift collected it. Read-only mirror, no
+-- origin/version tracking like customers/ingredients/expenses have: nothing
+-- on the dashboard ever creates, edits or deletes an individual payment.
+CREATE TABLE IF NOT EXISTS credit_payments (
+  id                SERIAL PRIMARY KEY,
+  branch_id         INTEGER NOT NULL,
+  local_id          INTEGER NOT NULL,
+  customer_local_id INTEGER,
+  local_shift_id    INTEGER,
+  amount            DOUBLE PRECISION DEFAULT 0,
+  note              TEXT,
+  received_by       TEXT,
+  created_at        TEXT,
+  received_at       BIGINT NOT NULL,
+  UNIQUE (branch_id, local_id)
+);
+CREATE INDEX IF NOT EXISTS idx_credit_payments_shift ON credit_payments(branch_id, local_shift_id);
+
+-- Every stock movement recorded at the till — a restock, a Convert-to-Yogurt,
+-- reported waste (backend/routes/inventory.js's recordEntry, the only thing
+-- that writes this table's till-side counterpart). Read-only mirror for the
+-- dashboard's own Stock History screen (routes/inventory.js's GET /history);
+-- nothing on the dashboard ever creates one of these — a stock movement is a
+-- physical event that happens at the shop, not something to log remotely.
+CREATE TABLE IF NOT EXISTS inventory_entries (
+  id                  SERIAL PRIMARY KEY,
+  branch_id           INTEGER NOT NULL,
+  local_id            INTEGER NOT NULL,
+  ingredient_local_id INTEGER,
+  type                TEXT,
+  amount              DOUBLE PRECISION DEFAULT 0,
+  entry_date          TEXT,
+  created_at          TEXT,
+  received_at         BIGINT NOT NULL,
+  UNIQUE (branch_id, local_id)
+);
+CREATE INDEX IF NOT EXISTS idx_inventory_entries_branch ON inventory_entries(branch_id, entry_date);
+
 CREATE TABLE IF NOT EXISTS ingredients (
   id          SERIAL PRIMARY KEY,
   branch_id   INTEGER NOT NULL,

@@ -107,9 +107,11 @@ const SHIFT_SELECT = `
     COALESCE(o.non_cash_revenue, 0)  AS non_cash_revenue,
     COALESCE(x.drawer_expenses, 0)   AS drawer_expenses,
     COALESCE(x.expense_count, 0)     AS expense_count,
+    COALESCE(cp.credit_collected, 0) AS credit_collected,
     CASE
       WHEN s.status = 'closed' AND s.expected_cash IS NOT NULL THEN s.expected_cash
-      ELSE COALESCE(s.opening_cash, 0) + COALESCE(o.cash_revenue, 0) - COALESCE(x.drawer_expenses, 0)
+      ELSE COALESCE(s.opening_cash, 0) + COALESCE(o.cash_revenue, 0)
+             + COALESCE(cp.credit_collected, 0) - COALESCE(x.drawer_expenses, 0)
     END AS expected_cash
   FROM shifts s
   LEFT JOIN branches b ON b.id = s.branch_id
@@ -130,6 +132,18 @@ const SHIFT_SELECT = `
       FROM expenses WHERE from_drawer = 1
      GROUP BY branch_id, local_shift_id
   ) x ON x.branch_id = s.branch_id AND x.local_shift_id = s.local_id
+  -- Cash collected from credit customers during this shift — see
+  -- db/schema.js's credit_payments table for why this join is what makes
+  -- that possible at all (a lifetime total_paid figure can't answer "how
+  -- much of that was THIS shift"). Mirrors backend/routes/shifts.js's own
+  -- shiftCreditCollectedStmt exactly, which this used to omit entirely —
+  -- a real formula mismatch, not just a missing join.
+  LEFT JOIN (
+    SELECT branch_id, local_shift_id,
+           COALESCE(SUM(amount), 0)::float8 AS credit_collected
+      FROM credit_payments
+     GROUP BY branch_id, local_shift_id
+  ) cp ON cp.branch_id = s.branch_id AND cp.local_shift_id = s.local_id
 `;
 
 /**

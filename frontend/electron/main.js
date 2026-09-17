@@ -5,6 +5,7 @@ const fs = require('fs');
 const http = require('http');
 const { buildReceiptBuffer } = require('./escpos-receipt');
 const { printRawBuffer } = require('./print-raw-windows');
+const { initAutoUpdater } = require('./auto-update');
 
 let mainWindow;
 let backendProcess;
@@ -375,6 +376,17 @@ if (!gotTheLock) {
     }
 
     createWindow();
+
+    // Only in a packaged install: there is no GitHub release matching
+    // whatever is on disk in development, so checking there would just log a
+    // "version not found" error on every launch.
+    if (app.isPackaged) {
+      try {
+        initAutoUpdater(mainWindow, log);
+      } catch (err) {
+        log('[Update] Failed to start updater: ' + err.message);
+      }
+    }
   });
 
   app.on('window-all-closed', () => {

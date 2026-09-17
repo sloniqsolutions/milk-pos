@@ -241,10 +241,14 @@ router.post('/:id/payments', (req, res) => {
     openShift ? openShift.id : null
   );
 
-  // The cloud has no credit_payments table of its own (see db/cloud-sync.js) —
-  // a payment moves the customer's balance, so it's the customer's recomputed
-  // standing that gets pushed, not the payment row itself.
+  // Two pushes: the customer's recomputed standing (balance, litres, ...),
+  // and the payment event itself — the cloud needs the individual row too,
+  // not just the resulting total, so a shift's "collected from credit
+  // customers" figure can be computed for that shift specifically rather
+  // than only known as a lifetime total (see cloud/db/schema.js's
+  // credit_payments table).
   syncUpsert('customers', getCustomerSummary(req.params.id));
+  syncUpsert('credit_payments', db.prepare('SELECT * FROM credit_payments WHERE id = ?').get(result.lastInsertRowid));
   res.status(201).json({ id: result.lastInsertRowid });
 });
 

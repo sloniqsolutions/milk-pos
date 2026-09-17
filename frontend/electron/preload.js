@@ -19,4 +19,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // otherwise or if either of these calls fails.
   listPrinters: () => ipcRenderer.invoke('list-printers'),
   printEscPos: (payload) => ipcRenderer.invoke('print-escpos', payload),
+
+  // Auto-update — see electron/auto-update.js and src/components/UpdateBanner.jsx.
+  onUpdateAvailable: (callback) => ipcRenderer.on('update-available', (_e, data) => callback(data)),
+  onUpdateDownloadProgress: (callback) => ipcRenderer.on('update-download-progress', (_e, data) => callback(data)),
+  onUpdateDownloaded: (callback) => ipcRenderer.on('update-downloaded', (_e, data) => callback(data)),
+  downloadUpdate: () => ipcRenderer.invoke('update-download'),
+  installUpdate: () => ipcRenderer.invoke('update-install'),
 });

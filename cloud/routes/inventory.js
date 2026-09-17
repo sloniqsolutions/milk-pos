@@ -195,4 +195,45 @@ router.get('/snapshot', requireBranch, async (req, res) => {
   }
 });
 
+/* -------------------------------------------------------- stock history -- */
+
+/**
+ * GET /api/inventory/history — the dashboard's own Stock History screen
+ * (frontend/src/pages/StockHistoryScreen.tsx, reused unaltered the same way
+ * InventoryScreen already is — see dashboard/src/Shell.jsx). Same query
+ * shape as the till's own GET /history in backend/routes/inventory.js:
+ * optional type/ingredient_id/from/to filters, newest first.
+ *
+ * requireUser rather than requireBranch — this is the dashboard asking, not
+ * a till — so it takes a branch from the query the same way branch-data.js's
+ * other listing routes do, defaulting to 1 (the only branch this product
+ * currently has).
+ */
+router.get('/history', requireUser, async (req, res) => {
+  const branchId = Number(req.query.branch) || 1;
+  const { type, ingredient_id: ingredientId, from, to } = req.query;
+
+  try {
+    const conditions = ['ie.branch_id = ?'];
+    const params = [branchId];
+    if (type) { conditions.push('ie.type = ?'); params.push(type); }
+    if (ingredientId) { conditions.push('ie.ingredient_local_id = ?'); params.push(Number(ingredientId)); }
+    if (from) { conditions.push('ie.entry_date >= ?'); params.push(from); }
+    if (to) { conditions.push('ie.entry_date <= ?'); params.push(to); }
+
+    const entries = await db.q(`
+      SELECT ie.local_id AS id, ie.ingredient_local_id AS ingredient_id, ie.type, ie.amount,
+             ie.entry_date, ie.created_at, i.name AS ingredient_name, i.unit AS ingredient_unit
+        FROM inventory_entries ie
+        LEFT JOIN ingredients i ON i.branch_id = ie.branch_id AND i.local_id = ie.ingredient_local_id
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY ie.entry_date DESC, ie.local_id DESC
+    `, params);
+
+    res.json(entries);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

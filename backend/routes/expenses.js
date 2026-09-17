@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db/database');
-const { syncUpsert, syncDelete } = require('../db/cloud-sync');
+const { syncUpsert, syncExpenseDelete } = require('../db/cloud-sync');
 
 /**
  * Petty cash paid out — rider fuel, staff lunch, a repair, and so on.
@@ -159,7 +159,7 @@ router.delete('/:id', (req, res) => {
     }
 
     db.prepare('DELETE FROM expenses WHERE id = ?').run(row.id);
-    syncDelete('expenses', row.id);
+    syncExpenseDelete(row.id);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

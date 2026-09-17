@@ -8,6 +8,7 @@ import Home from '@/pages/Home';
 import { AuthProvider } from './context/AuthContext';
 import { SettingsProvider } from './lib/SettingsContext';
 import ElectronCloseGuard from './components/ElectronCloseGuard';
+import UpdateBanner from './components/UpdateBanner';
 
 function App() {
   return (
@@ -15,6 +16,7 @@ function App() {
       <SettingsProvider>
       <QueryClientProvider client={queryClientInstance}>
         <ElectronCloseGuard />
+        <UpdateBanner />
         <Router>
           <ScrollToTop />
           <Routes>
