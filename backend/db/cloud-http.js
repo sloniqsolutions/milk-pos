@@ -67,9 +67,10 @@ function request(method, cloudUrl, path, apiKey, body) {
 
 const getJson = (cloudUrl, path, apiKey) => request('GET', cloudUrl, path, apiKey, null);
 const postJson = (cloudUrl, path, apiKey, body) => request('POST', cloudUrl, path, apiKey, body);
+const deleteJson = (cloudUrl, path, apiKey) => request('DELETE', cloudUrl, path, apiKey, null);
 
 /** For a body that isn't JSON — a gzip stream, with its own headers (see sync/backup-push.js). */
 const postRaw = (cloudUrl, path, apiKey, buffer, headers) =>
   requestRaw('POST', cloudUrl, path, apiKey, buffer, headers);
 
-module.exports = { getJson, postJson, postRaw };
+module.exports = { getJson, postJson, postRaw, deleteJson };

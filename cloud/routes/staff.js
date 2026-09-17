@@ -180,6 +180,58 @@ router.post('/', requireUser, async (req, res) => {
 });
 
 /**
+ * DELETE /api/staff/local/:localId — a till telling the cloud it just
+ * permanently removed one of its own staff (see backend/routes/staff.js's
+ * DELETE route, the only place that calls this).
+ *
+ * Without this, a till-side hard delete had nowhere to go: cloud-sync.js's
+ * old syncDelete() only logged a warning, so the cloud kept the row forever
+ * — a real bug, confirmed live (a staff member named "Awais", deleted at the
+ * till, stayed visible and active on the dashboard indefinitely). This is
+ * the till's half of the same tombstone mechanism the dashboard's own
+ * DELETE /:branchId/:localId (below) already uses in the other direction.
+ *
+ * Registered *before* that route on purpose: both are two-segment paths
+ * ("/local/:localId" vs "/:branchId/:localId"), Express matches routes in
+ * registration order, and "local" would otherwise be read as a branchId,
+ * routing every till's delete straight into the dashboard-only handler below
+ * and failing it with "sign in required" — exactly what happened the first
+ * time this was written with the routes in the other order.
+ *
+ * No admin/last-active-staff guards here — the till already enforced those
+ * (see backend/routes/staff.js) before its local delete succeeded, and this
+ * call only reports something that already happened. Re-guarding here would
+ * just risk refusing to record a deletion the till has no way to undo.
+ */
+router.delete('/local/:localId', requireBranch, async (req, res) => {
+  const localId = Number(req.params.localId);
+  if (!Number.isFinite(localId)) return res.status(400).json({ error: 'Bad staff id.' });
+
+  try {
+    const version = await db.tx(async (client) => {
+      const person = await client.query(db.toPg(
+        'SELECT name FROM staff WHERE branch_id = ? AND local_id = ?'), [req.branch.id, localId]);
+
+      await client.query(db.toPg(`
+        INSERT INTO staff_deletions (branch_id, local_id, name, deleted_by)
+        VALUES (?, ?, ?, 'till')
+        ON CONFLICT (branch_id, local_id) DO UPDATE SET
+          deleted_at = NOW(), name = EXCLUDED.name, deleted_by = EXCLUDED.deleted_by
+      `), [req.branch.id, localId, person.rows[0] ? person.rows[0].name : null]);
+
+      await client.query(db.toPg('DELETE FROM staff WHERE branch_id = ? AND local_id = ?'),
+        [req.branch.id, localId]);
+
+      return bumpVersion(client);
+    });
+
+    res.json({ success: true, staff_version: version });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * Change one.
  *
  * Addressed by branch and the till's own number, because `local_id` alone is
@@ -346,8 +398,6 @@ router.delete('/:branchId/:localId', requireUser, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-/* -------------------------------------------------------------- tills -- */
 
 /** One integer. Asked constantly, costs nothing. */
 router.get('/version', requireBranch, async (req, res) => {

@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/database');
 const bcrypt = require('bcryptjs');
-const { syncUpsert, syncDelete } = require('../db/cloud-sync');
+const { syncUpsert, syncStaffDelete } = require('../db/cloud-sync');
 const saltRounds = 10;
 const {
   createSession, destroySession, requireAdmin, requireAuth, isAdminRole, getSession,
@@ -98,8 +98,28 @@ router.post('/', requireAdmin, async (req, res) => {
 
   try {
     const hashedPin = await bcrypt.hash(String(pin), saltRounds);
-    const insert = db.prepare('INSERT INTO staff (name, role, pin, color, active) VALUES (?, ?, ?, ?, 1)');
-    const info = insert.run(name, role || 'Manager', hashedPin, color || '#DC2626');
+
+    /*
+     * Explicit id, kept under 10000 on purpose.
+     *
+     * cloud/routes/staff.js allocates its own staff ids starting at 10000
+     * specifically so a cloud-created account and a till-created one can
+     * never collide — the two allocators don't have to talk to each other.
+     * That only holds if this table's own "next id" actually stays below
+     * 10000. It doesn't by default: SQLite's rowid auto-assignment continues
+     * from the highest id *ever inserted*, and applyMenu/applyStaff's
+     * downlink (sync/downlink.js) inserts cloud accounts with their real
+     * 10000+ id explicitly. The first time this till pulls down a
+     * cloud-created account, every following plain `INSERT` (omitting id)
+     * jumps to 10001, 10002, ... — landing new till-created staff squarely in
+     * the cloud's own band, one accidental double-booking away from merging
+     * two different people into one row on the next sync. Computed fresh
+     * every time rather than cached, since the safe ceiling only ever moves
+     * up as more accounts are created.
+     */
+    const nextId = db.prepare('SELECT COALESCE(MAX(id), 0) + 1 AS id FROM staff WHERE id < 10000').get().id;
+    const insert = db.prepare('INSERT INTO staff (id, name, role, pin, color, active) VALUES (?, ?, ?, ?, ?, 1)');
+    const info = insert.run(nextId, name, role || 'Manager', hashedPin, color || '#DC2626');
     syncUpsert('staff', db.prepare('SELECT * FROM staff WHERE id = ?').get(info.lastInsertRowid));
     res.json({ id: info.lastInsertRowid, name, role, color: color || '#DC2626', active: 1 });
   } catch (err) {
@@ -169,7 +189,7 @@ router.delete('/:id', requireAdmin, (req, res) => {
     }
 
     db.prepare('DELETE FROM staff WHERE id = ?').run(req.params.id);
-    syncDelete('staff', req.params.id);
+    syncStaffDelete(req.params.id);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

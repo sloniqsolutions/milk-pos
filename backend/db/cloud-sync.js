@@ -16,7 +16,7 @@
  */
 
 const { readCloudConfig } = require('./cloud-config');
-const { postJson } = require('./cloud-http');
+const { postJson, deleteJson } = require('./cloud-http');
 const db = require('./database');
 const { getCustomerSummary } = require('./customer-summary');
 const { buildOrderSyncPayload } = require('./order-sync-payload');
@@ -96,6 +96,24 @@ function syncDelete(localTable) {
 }
 
 /**
+ * Tells the cloud a staff member was just permanently deleted at this till —
+ * see cloud/routes/staff.js's DELETE /local/:localId, the only thing this
+ * calls. Staff is the one table where a till-side hard delete is common
+ * (routes/staff.js's own DELETE route) and silently leaving a ghost record
+ * on the dashboard is a real problem (it stays selectable/active there
+ * indefinitely) — unlike the other tables syncDelete() covers, which are
+ * rare enough that a documented gap is an acceptable trade for not building
+ * a whole tombstone mechanism for them too.
+ */
+function syncStaffDelete(localId) {
+  const config = readCloudConfig();
+  if (!config) return;
+  deleteJson(config.cloudUrl, `/api/staff/local/${localId}`, config.apiKey).catch((err) => {
+    console.error('[Cloud] sync staff delete failed:', err.message);
+  });
+}
+
+/**
  * Pushes everything that already exists locally, right after pairing.
  *
  * Every other push in this module fires on a create or an edit — which is
@@ -138,4 +156,4 @@ function pushInitialBackfill() {
   pushBatches(config, 'orders', orders, 'orders (initial backfill)');
 }
 
-module.exports = { syncUpsert, syncUpsertMany, syncDelete, pushInitialBackfill };
+module.exports = { syncUpsert, syncUpsertMany, syncDelete, syncStaffDelete, pushInitialBackfill };
