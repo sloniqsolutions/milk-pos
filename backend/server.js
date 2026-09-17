@@ -129,18 +129,34 @@ const server = app.listen(PORT, HOST, () => {
   console.log(`POS Backend running on http://${HOST}:${PORT}`);
 });
 
-// Pulls the menu, staff roster and shop-wide settings down from the cloud
-// when paired (see backend/sync/downlink.js). A no-op every tick until
-// cloud-sync.json exists, so an unpaired till pays nothing for this.
-require('./sync/downlink').startDownlinkPolling();
+/**
+ * Cloud sync starts on the first sign-in of this process's life, not at
+ * process boot.
+ *
+ * It used to start here unconditionally — every one of these polls/pushes
+ * is already a no-op until cloud-sync.json exists, so it was harmless, but
+ * "harmless" isn't "correct": the till was reaching out to the internet
+ * before anyone had touched the PIN screen, which is backwards for an
+ * offline-first app whose whole point is that it works locally first and
+ * syncs *because* it's in use, not on its own initiative before anyone is
+ * even at it. See middleware/auth.js's setOnFirstSignIn — sessions are
+ * memory-only, so "a session was just created" and "the till just started
+ * being used this run" are the same event.
+ */
+require('./middleware/auth').setOnFirstSignIn(() => {
+  // Pulls the menu, staff roster and shop-wide settings down from the cloud
+  // when paired (see backend/sync/downlink.js). A no-op every tick until
+  // cloud-sync.json exists, so an unpaired till pays nothing for this.
+  require('./sync/downlink').startDownlinkPolling();
 
-// Feeds the dashboard's Live tab (see backend/sync/heartbeat.js). Same
-// no-op-until-paired behaviour as the downlink poller above.
-require('./sync/heartbeat').startHeartbeat();
+  // Feeds the dashboard's Live tab (see backend/sync/heartbeat.js). Same
+  // no-op-until-paired behaviour as the downlink poller above.
+  require('./sync/heartbeat').startHeartbeat();
 
-// Uploads the till's own daily backup to the cloud (see
-// backend/sync/backup-push.js) — same no-op-until-paired behaviour.
-require('./sync/backup-push').startBackupPush();
+  // Uploads the till's own daily backup to the cloud (see
+  // backend/sync/backup-push.js) — same no-op-until-paired behaviour.
+  require('./sync/backup-push').startBackupPush();
+});
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {

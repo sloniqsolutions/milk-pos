@@ -43,6 +43,19 @@ function pruneExpired(now = Date.now()) {
   }
 }
 
+/**
+ * Fires once, the first time anyone actually signs in this process's
+ * lifetime — see setOnFirstSignIn()/server.js. Tokens are memory-only (see
+ * this file's own docstring: a restart means everyone signs in again), so
+ * "a session was just created" is exactly the same event as "the till has
+ * just started being used," with no separate persisted-session case to
+ * also cover.
+ */
+let onFirstSignIn = null;
+function setOnFirstSignIn(callback) {
+  onFirstSignIn = callback;
+}
+
 function createSession(staff) {
   pruneExpired();
   const token = crypto.randomBytes(32).toString('hex');
@@ -52,6 +65,11 @@ function createSession(staff) {
     role: staff.role,
     expiresAt: Date.now() + SESSION_TTL_MS,
   });
+  if (onFirstSignIn) {
+    const fire = onFirstSignIn;
+    onFirstSignIn = null; // once only — cloud sync's own start functions are themselves idempotent, but no reason to call them twice
+    fire();
+  }
   return token;
 }
 
@@ -135,5 +153,6 @@ module.exports = {
   requireAuth,
   requireAdmin,
   adminOnlyWrites,
+  setOnFirstSignIn,
   sessions,
 };
