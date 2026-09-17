@@ -1,11 +1,8 @@
 import React, { useState } from 'react';
-import { Trash2, Plus, Minus, CreditCard, Banknote, Globe, ChevronUp, ChevronDown, Wallet, ChevronRight } from 'lucide-react';
+import { Trash2, Plus, Minus, CreditCard, Banknote, Globe, Wallet, ChevronRight, Droplet } from 'lucide-react';
 import { PAYMENT_METHODS, type PaymentMethod } from '@/lib/constants';
 import { useSettings } from '@/lib/SettingsContext';
-import { usePOS } from '@/lib/POSContext';
-import litre1 from '@/assets/litre1.png';
-import litre2 from '@/assets/litre2.png';
-import litre5 from '@/assets/litre5.png';
+import AddMilkDahiModal from '@/components/pos/AddMilkDahiModal';
 
 const BLUE = '#1B4C82';
 const BLUE_DARK = '#123A66';
@@ -77,6 +74,7 @@ export default function OrderCart({
   onCharge,
 }: OrderCartProps) {
   const { formatMoney, currencySymbol, employeeDiscountRate } = useSettings();
+  const [showAddMilkDahi, setShowAddMilkDahi] = useState(false);
   const subtotal = cart.reduce((sum: number, item: CartItem) => sum + (item.price * item.qty), 0);
   const appliedDelivery = orderType === 'Delivery' ? deliveryCharge : 0;
   const total = Math.max(0, subtotal - discountAmount - employeeDiscount) + taxAmount + appliedDelivery;
@@ -106,7 +104,22 @@ export default function OrderCart({
       {/* Scrollable middle: Quick Add + Items live in ONE scroll region so
           they can never overlap or squeeze each other or the footer. */}
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
-        {onAddToCart && <QuickAddPanel onAddToCart={onAddToCart} />}
+        {onAddToCart && (
+          <div style={{ padding: '12px 18px', borderBottom: '1px solid #E5E9F0', flexShrink: 0 }}>
+            <button
+              onClick={() => setShowAddMilkDahi(true)}
+              style={{
+                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                height: 40, borderRadius: 8, border: `1.5px solid ${BLUE}`, background: BLUE_TINT,
+                color: BLUE_DARK, fontWeight: 700, fontSize: 13.5, cursor: 'pointer', transition: 'background 140ms',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = '#DCEAFA'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = BLUE_TINT; }}
+            >
+              <Droplet size={16} /> Add Milk / Dahi
+            </button>
+          </div>
+        )}
 
         <div style={{ flex: 1, padding: '12px 18px', display: 'flex', flexDirection: 'column' }}>
           {cart.length === 0 ? (
@@ -446,158 +459,24 @@ export default function OrderCart({
           </button>
         </div>
       </div>
+
+      {onAddToCart && (
+        <AddMilkDahiModal
+          isOpen={showAddMilkDahi}
+          onClose={() => setShowAddMilkDahi(false)}
+          onAdd={onAddToCart}
+        />
+      )}
     </div>
   );
 }
 
 /**
- * Rounds a quantity to at most 2 decimal places.
- *
- * The "amount → litres" quick-add divides by a price and snaps to the
- * nearest 0.05, which floating point arithmetic can leave as something like
- * 1.1500000000000001. That value then flowed straight into the cart display
- * and the receipt, so it is cleaned up once, here.
+ * Rounds a quantity to at most 2 decimal places, for display in the cart
+ * list — custom Milk/Dahi amounts (see AddMilkDahiModal) can otherwise leave
+ * a value like 1.1500000000000001 from plain floating point division.
  */
 function roundQty(qty: number): number {
   return Math.round(qty * 100) / 100;
 }
 
-function parseLitres(label: string): number {
-  const match = label.match(/[\d.]+/);
-  return match ? parseFloat(match[0]) : 1;
-}
-
-function sizeAsset(litres: number): string | null {
-  if (litres === 0.5) return litre5;
-  if (litres === 1) return litre1;
-  if (litres === 2) return litre2;
-  return null;
-}
-
-function QuickAddPanel({ onAddToCart }: { onAddToCart: (item: { id: number; name: string; price: number; variant_id?: number | null; qty?: number }) => void }) {
-  const { menuItems } = usePOS();
-  const { formatMoney, currencySymbol } = useSettings();
-  const [collapsed, setCollapsed] = useState(false);
-  const [litres, setLitres] = useState('');
-  const [amount, setAmount] = useState('');
-
-  const milkItems = menuItems.filter((i: any) => i.category === 'Milk');
-  const standard1L = milkItems.find((i: any) => i.name === '1 Litre' || i.name.includes('1')) || milkItems[0];
-  const perLitre = standard1L ? standard1L.price : 200;
-
-  const litresNum = Number(litres) || 0;
-  const litresPrice = Math.round(litresNum * perLitre);
-
-  const amountNum = Number(amount) || 0;
-  const amountLitres = amountNum > 0 ? roundQty(Math.round((amountNum / perLitre) / 0.05) * 0.05) : 0;
-
-  return (
-    <div style={{ padding: '12px 18px', borderBottom: '1px solid #E5E9F0', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: collapsed ? 0 : 12 }}>
-      <button
-        onClick={() => setCollapsed(c => !c)}
-        style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          background: 'none', border: 'none', cursor: 'pointer', padding: 0,
-        }}
-      >
-        <span style={{ fontSize: 12, fontWeight: 700, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.4px' }}>
-          Quick Add Milk
-        </span>
-        <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, fontWeight: 600, color: BLUE }}>
-          {collapsed ? 'Show' : 'Hide'}
-          {collapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
-        </span>
-      </button>
-
-      {!collapsed && (
-        <>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {milkItems.map((item: any) => {
-              const litresVal = parseLitres(item.name);
-              const asset = sizeAsset(litresVal);
-              return (
-                <button
-                  key={item.id}
-                  onClick={() => onAddToCart({ id: item.id, name: item.name, price: item.price, qty: 1 })}
-                  style={{
-                    flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4,
-                    padding: '8px 4px', borderRadius: 10, border: '1.5px solid #E5E9F0',
-                    background: '#FFFFFF', cursor: 'pointer', transition: 'all 140ms',
-                  }}
-                  onMouseEnter={e => { e.currentTarget.style.borderColor = BLUE; e.currentTarget.style.background = BLUE_TINT; }}
-                  onMouseLeave={e => { e.currentTarget.style.borderColor = '#E5E9F0'; e.currentTarget.style.background = '#FFFFFF'; }}
-                >
-                  {asset ? <img src={asset} alt={item.name} style={{ width: 30, height: 30, objectFit: 'contain' }} /> : <div style={{ fontSize: 20 }}>🥛</div>}
-                  <span style={{ fontSize: 11.5, fontWeight: 700, color: '#0F1720' }}>{item.name}</span>
-                  <span style={{ fontSize: 11, fontWeight: 600, color: BLUE }}>{formatMoney(item.price)}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          <div style={{ display: 'flex', gap: 8 }}>
-            <input
-              type="number" min="0" step="0.5"
-              value={litres}
-              onChange={e => setLitres(e.target.value)}
-              placeholder="Litres (e.g. 5)"
-              style={{ flex: 1, height: 38, borderRadius: 8, border: '1.5px solid #E5E9F0', background: '#F7F9FC', padding: '0 10px', fontSize: 13, fontWeight: 600, color: '#0F1720', outline: 'none', fontFamily: 'Inter, sans-serif' }}
-              onFocus={e => { e.currentTarget.style.borderColor = BLUE; }}
-              onBlur={e => { e.currentTarget.style.borderColor = '#E5E9F0'; }}
-            />
-            <button
-              disabled={litresNum <= 0 || !standard1L}
-              title={litresNum > 0 ? `Add ${litresNum} L — ${formatMoney(litresPrice)}` : 'Enter litres first'}
-              onClick={() => {
-                if (standard1L) {
-                  onAddToCart({ id: standard1L.id, name: `Milk (${litresNum} L)`, price: perLitre, qty: litresNum });
-                  setLitres('');
-                }
-              }}
-              style={{
-                width: 38, height: 38, borderRadius: 8, border: 'none', flexShrink: 0,
-                background: litresNum > 0 ? BLUE : '#E5E9F0',
-                color: litresNum > 0 ? '#FFFFFF' : '#9CA3AF',
-                fontSize: 18, fontWeight: 700, cursor: litresNum > 0 ? 'pointer' : 'not-allowed',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}
-            >
-              +
-            </button>
-          </div>
-
-          <div style={{ display: 'flex', gap: 8 }}>
-            <input
-              type="number" min="0"
-              value={amount}
-              onChange={e => setAmount(e.target.value)}
-              placeholder={`Pay (${currencySymbol})`}
-              style={{ flex: 1, height: 38, borderRadius: 8, border: '1.5px solid #E5E9F0', background: '#F7F9FC', padding: '0 10px', fontSize: 13, fontWeight: 600, color: '#0F1720', outline: 'none', fontFamily: 'Inter, sans-serif' }}
-              onFocus={e => { e.currentTarget.style.borderColor = BLUE; }}
-              onBlur={e => { e.currentTarget.style.borderColor = '#E5E9F0'; }}
-            />
-            <button
-              disabled={amountNum <= 0 || !standard1L}
-              title={amountNum > 0 ? `Add ${amountLitres} L` : 'Enter an amount first'}
-              onClick={() => {
-                if (standard1L) {
-                  onAddToCart({ id: standard1L.id, name: `Milk (Custom ${amountLitres} L)`, price: perLitre, qty: amountLitres });
-                  setAmount('');
-                }
-              }}
-              style={{
-                width: 38, height: 38, borderRadius: 8, border: 'none', flexShrink: 0,
-                background: amountNum > 0 ? BLUE : '#E5E9F0',
-                color: amountNum > 0 ? '#FFFFFF' : '#9CA3AF',
-                fontSize: 18, fontWeight: 700, cursor: amountNum > 0 ? 'pointer' : 'not-allowed',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}
-            >
-              +
-            </button>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
