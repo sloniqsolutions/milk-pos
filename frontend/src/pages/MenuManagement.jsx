@@ -1,10 +1,11 @@
 // @ts-nocheck
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Plus, Pencil, Trash2, X, Package, Loader2, GlassWater, Droplet, Coffee, Pin } from 'lucide-react';
 import { usePOS } from '@/lib/POSContext';
 import { MENU_CATEGORIES, DEFAULT_CATEGORY } from '@/lib/constants';
 import { useSettings } from '@/lib/SettingsContext';
 import { useAuth } from '@/context/AuthContext';
+import { cloudAPI } from '@/api/index';
 import SearchBar from '@/components/pos-ui/SearchBar';
 import useDialogs from '@/lib/useDialogs';
 
@@ -42,7 +43,19 @@ export default function MenuManagement() {
   const [search, setSearch] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState(null);
-  const { confirm, dialog } = useDialogs();
+  const [cloudPaired, setCloudPaired] = useState(false);
+  const { confirm, alertCard, dialog } = useDialogs();
+
+  // Mirrors backend/routes/menu.js's blockIfPaired: once this till is paired,
+  // every write here is refused anyway (409 MENU_CLOUD_OWNED) so the menu can
+  // only ever be edited from the dashboard. Checking this up front means the
+  // buttons are gone rather than present-but-guaranteed-to-fail, which is
+  // what used to make a blocked delete look like it silently did nothing.
+  useEffect(() => {
+    cloudAPI.status().then(s => setCloudPaired(!!s.paired)).catch(() => {});
+  }, []);
+
+  const canEdit = isAdmin && !cloudPaired;
 
   const availableCategories = useMemo(() => {
     const live = menuItems.map(i => i.category).filter(Boolean);
@@ -70,7 +83,16 @@ export default function MenuManagement() {
       tone: 'danger',
       confirmLabel: 'Delete',
     });
-    if (ok) deleteMenuItem(id);
+    if (!ok) return;
+    try {
+      await deleteMenuItem(id);
+    } catch (error) {
+      alertCard({
+        title: 'Could Not Delete',
+        message: error.message || 'Something went wrong.',
+        tone: 'warning',
+      });
+    }
   };
 
   if (loading) {
@@ -89,7 +111,7 @@ export default function MenuManagement() {
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 24 }}>
           <h1 style={{ color: '#0F1720', fontWeight: 700, fontSize: 24 }}>Menu Management</h1>
-          {isAdmin && (
+          {canEdit && (
             <button
               onClick={openAdd}
               className="flex items-center gap-2 transition-all duration-150"
@@ -114,6 +136,16 @@ export default function MenuManagement() {
             background: '#FEF3C7', color: '#92400E', fontSize: 13,
           }}>
             View only — changing the menu is restricted to an administrator.
+          </div>
+        )}
+
+        {isAdmin && cloudPaired && (
+          <div style={{
+            marginBottom: 16, padding: '10px 14px', borderRadius: 8,
+            background: '#EFF6FF', color: '#1E40AF', fontSize: 13,
+          }}>
+            The menu is managed from the dashboard once this till is connected to the cloud.
+            Edit prices and items there — changes sync down automatically.
           </div>
         )}
 
@@ -186,7 +218,7 @@ export default function MenuManagement() {
                   formatMoney(item.price)
                 )}
               </div>
-              {isAdmin && (
+              {canEdit && (
                 <>
                   <IconBtn
                     icon={Pencil}
@@ -214,13 +246,22 @@ export default function MenuManagement() {
           item={editingItem}
           categories={availableCategories}
           onClose={() => setModalOpen(false)}
-          onSave={(data) => {
-            if (editingItem) {
-              updateMenuItem(editingItem.id, data);
-            } else {
-              addMenuItem(data);
+          onSave={async (data) => {
+            try {
+              if (editingItem) {
+                await updateMenuItem(editingItem.id, data);
+              } else {
+                await addMenuItem(data);
+              }
+              setModalOpen(false);
+            } catch (error) {
+              setModalOpen(false);
+              alertCard({
+                title: editingItem ? 'Could Not Save Changes' : 'Could Not Add Item',
+                message: error.message || 'Something went wrong.',
+                tone: 'warning',
+              });
             }
-            setModalOpen(false);
           }}
         />
       )}
