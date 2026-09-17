@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { useState, useEffect, useRef } from 'react';
-import { Store, Percent, Receipt, Printer, Clock, Database, Download, Send, Cloud, CheckCircle2, XCircle } from 'lucide-react';
+import { Store, Percent, Receipt, Printer, Clock, Database, Download, Send, Cloud, CheckCircle2, XCircle, LogOut } from 'lucide-react';
 import PageHeader from '@/components/pos-ui/PageHeader';
 import Toggle from '@/components/pos-ui/Toggle';
 import Toast from '@/components/pos-ui/Toast';
@@ -19,6 +19,7 @@ const NAV_ITEMS = [
   { id: 'backup', label: 'Data & Backup', icon: Database },
   { id: 'reports', label: 'Reports', icon: Send },
   { id: 'cloud', label: 'Branch & Cloud', icon: Cloud },
+  { id: 'account', label: 'Account', icon: LogOut },
 ];
 
 const CARD_STYLE = {
@@ -81,11 +82,37 @@ export default function Settings() {
   // renders money the same way the rest of the app does. `refreshSettings` is
   // called after a save so the change reaches the sale screen immediately.
   const { formatMoney, currencySymbol, refresh: refreshSettings } = useSettings();
-  const { currentUser } = useAuth();
+  const { currentUser, logout } = useAuth();
   const [activeSection, setActiveSection] = useState('restaurant');
   const [toast, setToast] = useState(null);
-  const { confirm, dialog } = useDialogs();
+  const { confirm, alertCard, dialog } = useDialogs();
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [checkingLogout, setCheckingLogout] = useState(false);
+
+  /** Same shift-open guard as Sidebar.tsx's own Logout button — see its
+   * comment. Added here too since the sidebar's copy can scroll off-screen
+   * on Admin (more nav items than Manager) on a short window; this one
+   * always has room since Settings' own nav never grows. */
+  const handleLogout = async () => {
+    if (checkingLogout) return;
+    setCheckingLogout(true);
+    try {
+      const shift = await shiftsAPI.current();
+      if (shift) {
+        await alertCard({
+          title: 'Shift Still Open',
+          message: 'Close your shift on the Shifts screen before signing out — the drawer needs to be counted first.',
+          tone: 'warning',
+        });
+        return;
+      }
+    } catch (e) {
+      // Can't reach the backend — don't trap someone who is trying to leave.
+    } finally {
+      setCheckingLogout(false);
+    }
+    logout();
+  };
 
   const [profile, setProfile] = useState({
     name: 'Pure Milk', tagline: '', address: '', phone: '', footerMessage: 'Thank you for your purchase!',
@@ -1316,6 +1343,31 @@ export default function Settings() {
     </div>
   );
 
+  const renderAccount = () => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div style={{ ...CARD_STYLE, padding: 20 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: '#111827' }}>
+          Signed in as {currentUser?.name || '—'}
+        </div>
+        <div style={{ fontSize: 13, color: '#6B7280', marginTop: 4 }}>
+          {currentUser?.role || 'Staff'}
+        </div>
+        <button
+          onClick={handleLogout}
+          disabled={checkingLogout}
+          className="flex items-center gap-2"
+          style={{
+            marginTop: 16, background: '#FFFFFF', border: '1px solid #EF4444', color: '#EF4444',
+            height: 40, borderRadius: 8, fontWeight: 600, fontSize: 14, padding: '0 20px',
+            cursor: checkingLogout ? 'default' : 'pointer', opacity: checkingLogout ? 0.6 : 1,
+          }}
+        >
+          <LogOut size={16} /> {checkingLogout ? 'Checking…' : 'Sign Out'}
+        </button>
+      </div>
+    </div>
+  );
+
   const sectionRenderers = {
     restaurant: renderRestaurant,
     tax: renderTax,
@@ -1325,6 +1377,7 @@ export default function Settings() {
     backup: renderBackup,
     reports: renderReports,
     cloud: renderCloud,
+    account: renderAccount,
   };
 
   return (

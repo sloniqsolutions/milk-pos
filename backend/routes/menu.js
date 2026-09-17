@@ -2,34 +2,27 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/database');
 const { cascadeUniversalPricing, derivedPriceFor } = require('../db/menu-pricing');
-const { readCloudConfig } = require('../db/cloud-config');
-// No cloud sync here on purpose: the cloud owns the menu outright (a till
-// only ever pulls it, via cloud/routes/menu.js's version-poll/snapshot
-// downlink) and the ingest API has no path for a till to push a menu change
-// up — see db/cloud-sync.js.
+const { syncMenuUpsert } = require('../db/cloud-sync');
 
 /**
- * Once paired, a write here would be a lie: it updates this till's own
- * SQLite, looks like it worked, and then either sits there quietly
- * diverging from the dashboard forever, or gets silently overwritten by the
- * next downlink poll with no explanation either way. That gap used to be
- * purely theoretical — this comment block said as much without any code
- * enforcing it — until a real shop renamed "1 Litre" to "1 Litre Milk" at
- * the till: the price cascade (db/menu-pricing.js) stopped recognizing it as
- * the universal item, every sized item under it silently stopped updating,
- * and none of it ever reached the dashboard to be noticed or fixed there.
- * Refusing the write here, with a message that says where it actually
- * belongs, beats a button that appears to work and isn't.
+ * The menu is editable from both sides once paired: here, and from the
+ * dashboard (cloud/routes/menu.js). Every write below still applies locally
+ * first — this till never waits on the cloud, same as every other screen —
+ * and then pushes the saved row to `POST /api/menu/from-till`
+ * (cloud/db/cloud-sync.js -> cloud/routes/menu.js), which upserts it there
+ * by name and re-runs the same universal-price cascade the dashboard's own
+ * edits trigger. This till's *next* downlink poll pulls that snapshot back
+ * down — including any sibling sizes the cascade just repriced that this
+ * till never touched directly — so both sides converge without this file
+ * needing to know anything about cascades on the cloud's behalf.
+ *
+ * This used to be blocked outright after a real shop renamed "1 Litre" to
+ * "1 Litre Milk" here and the price cascade silently stopped recognizing it,
+ * with no error and nothing reaching the dashboard. That bug was in
+ * db/menu-pricing.js's exact-name matching, not in allowing the write — it's
+ * fixed there now (matching by parsed value instead), so editing here no
+ * longer needs to be refused to stay safe.
  */
-function blockIfPaired(req, res, next) {
-  if (readCloudConfig()) {
-    return res.status(409).json({
-      error: 'The menu is managed from the dashboard once this till is connected to the cloud. Edit prices and items there — changes sync down automatically.',
-      code: 'MENU_CLOUD_OWNED',
-    });
-  }
-  next();
-}
 
 // Get all menu items. Retired items are hidden unless explicitly requested.
 router.get('/', (req, res) => {
@@ -61,7 +54,7 @@ router.get('/', (req, res) => {
 });
 
 // Add new item
-router.post('/', blockIfPaired, (req, res) => {
+router.post('/', (req, res) => {
   const { name, category, price, image_url, variants, description } = req.body;
   
   if (!name || !category) {
@@ -121,6 +114,7 @@ router.post('/', blockIfPaired, (req, res) => {
       newItem.variants = [];
     }
 
+    syncMenuUpsert(newItem);
     res.status(201).json(newItem);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -128,7 +122,7 @@ router.post('/', blockIfPaired, (req, res) => {
 });
 
 // Update item
-router.put('/:id', blockIfPaired, (req, res) => {
+router.put('/:id', (req, res) => {
   const { name, category, price, image_url, variants, description } = req.body;
   const { id } = req.params;
   
@@ -186,6 +180,7 @@ router.put('/:id', blockIfPaired, (req, res) => {
       updatedItem.variants = [];
     }
 
+    syncMenuUpsert(updatedItem);
     res.json(updatedItem);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -209,13 +204,14 @@ router.put('/:id', blockIfPaired, (req, res) => {
  * screen, deals that reference it keep working, and historical reporting is
  * unchanged.
  */
-router.delete('/:id', blockIfPaired, (req, res) => {
+router.delete('/:id', (req, res) => {
   try {
-    const item = db.prepare('SELECT id, name, active FROM menu_items WHERE id = ?').get(req.params.id);
+    const item = db.prepare('SELECT * FROM menu_items WHERE id = ?').get(req.params.id);
     if (!item) return res.status(404).json({ error: 'Menu item not found' });
 
     db.prepare('UPDATE menu_items SET active = 0 WHERE id = ?').run(item.id);
 
+    syncMenuUpsert({ ...item, active: 0 });
     res.json({
       success: true,
       retired: true,
@@ -228,10 +224,13 @@ router.delete('/:id', blockIfPaired, (req, res) => {
 });
 
 // Restore a retired item.
-router.put('/:id/restore', blockIfPaired, (req, res) => {
+router.put('/:id/restore', (req, res) => {
   try {
     const info = db.prepare('UPDATE menu_items SET active = 1 WHERE id = ?').run(req.params.id);
     if (info.changes === 0) return res.status(404).json({ error: 'Menu item not found' });
+
+    const item = db.prepare('SELECT * FROM menu_items WHERE id = ?').get(req.params.id);
+    syncMenuUpsert(item);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

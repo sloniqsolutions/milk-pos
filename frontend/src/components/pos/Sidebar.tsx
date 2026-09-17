@@ -118,8 +118,11 @@ export default function Sidebar({ activePage, onNavigate }: SidebarProps) {
 
       <div style={{ width: 36, height: 1, background: '#E5E9F0', marginBottom: 12 }} />
 
-      {/* Nav items */}
-      <div style={{ flex: 1, width: '100%', display: 'flex', flexDirection: 'column', gap: 4, padding: '0 10px' }}>
+      {/* Nav items. minHeight: 0 lets this shrink inside the flex column instead
+          of overflowing it — without it, Admin's extra items (menu, inventory,
+          stock history, staff, settings) pushed the Logout button below the
+          bottom of the screen on shorter windows, with no way to scroll to it. */}
+      <div style={{ flex: 1, minHeight: 0, width: '100%', display: 'flex', flexDirection: 'column', gap: 4, padding: '0 10px', overflowY: 'auto' }}>
         {navItems.map(({ id, icon: Icon, label }) => {
           const isActive = activePage === id;
           return (

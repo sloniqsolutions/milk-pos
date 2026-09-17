@@ -1,26 +1,23 @@
 /**
- * The menu — the one thing the cloud owns outright.
+ * The menu — editable from both the dashboard and a paired till.
  *
- * Everything else in this system travels upward: the branches record sales and
- * the cloud reports on them. The menu goes the other way, and that only works
- * because there is exactly **one writer**. The owner edits here; the tills only
- * ever read. With a single writer there are no conflicts to resolve, which
- * removes the hardest part of synchronisation by design rather than solving it.
+ * The dashboard writes here directly (the routes just below). A till writes
+ * its own SQLite first, same as every other screen, then pushes the saved
+ * row up through `POST /api/menu/from-till`, which upserts it by name and
+ * re-runs the same universal-price cascade a dashboard edit triggers — see
+ * that route's own comment for why matching by name (not id) is what makes
+ * this work with no shared id space between a till and this table.
  *
- * The consequence, accepted deliberately: the tills' own Menu and Deals screens
- * become read-only, for the owner too. A local edit would be silently discarded
- * by the next snapshot, and silently discarding somebody's work is worse than
- * not letting them start.
+ * Three endpoints exist for the tills:
  *
- * Two endpoints exist for the tills, and the split between them is what makes
- * this survivable on a bad connection:
+ *   GET  /api/menu/version    a single integer, a few bytes, asked constantly
+ *   GET  /api/menu/snapshot   the whole menu, fetched only when that number moves
+ *   POST /api/menu/from-till  a till's own create/update/retire, pushed up
  *
- *   GET /api/menu/version   a single integer, a few bytes, asked constantly
- *   GET /api/menu/snapshot  the whole menu, fetched only when that number moves
- *
- * A till on a weak link can always afford the first. It downloads the second
- * rarely, and if that download fails it simply keeps selling from the menu it
- * already has.
+ * A till on a weak link can always afford the version check. It downloads a
+ * full snapshot only when that number moves, and if that download fails it
+ * simply keeps selling from the menu it already has — the same reasoning
+ * that keeps every push here fire-and-forget rather than blocking a save.
  */
 
 const express = require('express');
@@ -190,6 +187,66 @@ router.delete('/:id', requireUser, async (req, res) => {
 });
 
 /* ------------------------------------------------------------- the tills -- */
+
+/**
+ * POST /api/menu/from-till — a till pushing its own create/update/retire.
+ *
+ * Upserted by *name*, not id: a till's menu_items ids are its own plain
+ * SQLite AUTOINCREMENT, unrelated to this table's — the same reason
+ * backend/sync/downlink.js's applyMenu() matches the other direction by name
+ * too. `variants` is only touched when the till actually sent an array —
+ * omitted on a retire/restore push, which only means the active flag, so it
+ * leaves whatever variants this row already had alone rather than deleting
+ * them.
+ *
+ * Runs the identical cascade a dashboard edit triggers, so a till-side
+ * change to "1 Litre" reprices "0.5 Litre"/"2 Litre" here exactly as it
+ * would if the owner had typed it into the dashboard — the pushing till
+ * picks that up on its own next downlink poll, same as every other till.
+ */
+router.post('/from-till', requireBranch, async (req, res) => {
+  const { name, category, price, description, has_variants, active, variants } = req.body || {};
+  if (!name) return res.status(400).json({ error: 'Name required' });
+
+  try {
+    const result = await db.tx(async (client) => {
+      const existing = await client.query('SELECT * FROM menu_items WHERE name = $1', [str(name)]);
+      let item;
+      if (existing.rows.length) {
+        const updated = await client.query(`
+          UPDATE menu_items SET
+            category = $1, price = $2, description = $3, has_variants = $4, active = $5
+          WHERE id = $6 RETURNING *
+        `, [str(category), num(price) || 0, str(description), has_variants ? 1 : 0,
+            active == null ? 1 : (active ? 1 : 0), existing.rows[0].id]);
+        item = updated.rows[0];
+      } else {
+        const inserted = await client.query(`
+          INSERT INTO menu_items (name, category, price, description, has_variants, active)
+          VALUES ($1, $2, $3, $4, $5, $6) RETURNING *
+        `, [str(name), str(category), num(price) || 0, str(description), has_variants ? 1 : 0,
+            active == null ? 1 : (active ? 1 : 0)]);
+        item = inserted.rows[0];
+      }
+
+      if (Array.isArray(variants)) {
+        await client.query('DELETE FROM item_variants WHERE menu_item_id = $1', [item.id]);
+        for (const [i, v] of variants.entries()) {
+          await client.query(
+            'INSERT INTO item_variants (menu_item_id, label, price, sort_order) VALUES ($1,$2,$3,$4)',
+            [item.id, str(v.label), num(v.price) || 0, num(v.sort_order) ?? i]);
+        }
+      }
+
+      await cascadeUniversalPricing(client, item);
+      const version = await bumpVersion(client);
+      return version;
+    });
+    res.json({ success: true, menu_version: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 /**
  * GET /api/menu/version — a few bytes, asked constantly.

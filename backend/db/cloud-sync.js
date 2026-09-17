@@ -124,6 +124,32 @@ function syncExpenseDelete(localId) {
 }
 
 /**
+ * Pushes a till-side menu create/update/retire/restore up to
+ * cloud/routes/menu.js's POST /from-till, which upserts it by name (menu
+ * items have no shared id space between till and cloud — see
+ * backend/sync/downlink.js's own name-matched applyMenu()) and re-runs the
+ * universal-price cascade there. This till's next downlink poll pulls the
+ * result back down, including any sibling sizes the cascade repriced that
+ * this push never mentioned — see backend/routes/menu.js's own note on why
+ * that round trip is enough instead of duplicating the cascade here.
+ */
+function syncMenuUpsert(item) {
+  const config = readCloudConfig();
+  if (!config || !item) return;
+  postJson(config.cloudUrl, '/api/menu/from-till', config.apiKey, {
+    name: item.name,
+    category: item.category,
+    price: item.price,
+    description: item.description,
+    has_variants: item.has_variants,
+    active: item.active,
+    variants: item.variants,
+  }).catch((err) => {
+    console.error('[Cloud] sync menu item failed:', err.message);
+  });
+}
+
+/**
  * Pushes everything that already exists locally, right after pairing.
  *
  * Every other push in this module fires on a create or an edit — which is
@@ -172,4 +198,4 @@ function pushInitialBackfill() {
   pushBatches(config, 'orders', orders, 'orders (initial backfill)');
 }
 
-module.exports = { syncUpsert, syncUpsertMany, syncDelete, syncStaffDelete, syncExpenseDelete, pushInitialBackfill };
+module.exports = { syncUpsert, syncUpsertMany, syncDelete, syncStaffDelete, syncExpenseDelete, syncMenuUpsert, pushInitialBackfill };

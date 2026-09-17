@@ -1,11 +1,10 @@
 // @ts-nocheck
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo } from 'react';
 import { Plus, Pencil, Trash2, X, Package, Loader2, GlassWater, Droplet, Coffee, Pin } from 'lucide-react';
 import { usePOS } from '@/lib/POSContext';
 import { MENU_CATEGORIES, DEFAULT_CATEGORY } from '@/lib/constants';
 import { useSettings } from '@/lib/SettingsContext';
 import { useAuth } from '@/context/AuthContext';
-import { cloudAPI } from '@/api/index';
 import SearchBar from '@/components/pos-ui/SearchBar';
 import useDialogs from '@/lib/useDialogs';
 
@@ -43,19 +42,13 @@ export default function MenuManagement() {
   const [search, setSearch] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState(null);
-  const [cloudPaired, setCloudPaired] = useState(false);
   const { confirm, alertCard, dialog } = useDialogs();
 
-  // Mirrors backend/routes/menu.js's blockIfPaired: once this till is paired,
-  // every write here is refused anyway (409 MENU_CLOUD_OWNED) so the menu can
-  // only ever be edited from the dashboard. Checking this up front means the
-  // buttons are gone rather than present-but-guaranteed-to-fail, which is
-  // what used to make a blocked delete look like it silently did nothing.
-  useEffect(() => {
-    cloudAPI.status().then(s => setCloudPaired(!!s.paired)).catch(() => {});
-  }, []);
-
-  const canEdit = isAdmin && !cloudPaired;
+  // Menu edits here now push up to the cloud too (see backend/routes/menu.js
+  // and cloud/routes/menu.js's POST /from-till) rather than being refused
+  // once paired, so this is just the ordinary admin-only gate every other
+  // write in the app uses.
+  const canEdit = isAdmin;
 
   const availableCategories = useMemo(() => {
     const live = menuItems.map(i => i.category).filter(Boolean);
@@ -139,15 +132,6 @@ export default function MenuManagement() {
           </div>
         )}
 
-        {isAdmin && cloudPaired && (
-          <div style={{
-            marginBottom: 16, padding: '10px 14px', borderRadius: 8,
-            background: '#EFF6FF', color: '#1E40AF', fontSize: 13,
-          }}>
-            The menu is managed from the dashboard once this till is connected to the cloud.
-            Edit prices and items there — changes sync down automatically.
-          </div>
-        )}
 
         <div style={{ marginBottom: 20 }}>
           <SearchBar

@@ -44,7 +44,7 @@ function ensureCloudSyncConfig(backendDir) {
 
   const config = {
     enabled: true,
-    cloud_url: 'https://milk-pos.netlify.app',
+    cloud_url: 'https://milk-pos.virtiqosolutions.com',
     branch_id: 1,
     branch_name: 'Pure Milk',
     api_key: '0c8b6ffb654e510ecaff0e312e5a7b07b3b153d89fe5c6ea554d97bfa9823e3e',

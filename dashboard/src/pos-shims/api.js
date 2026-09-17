@@ -244,18 +244,6 @@ export const syncAPI = {
   status: () => request('GET', '/branches/completeness'),
 };
 
-/**
- * Stubbed for the reused MenuManagement.jsx (see backend/routes/menu.js's
- * blockIfPaired) — that screen calls cloudAPI.status() to hide its own
- * edit/delete buttons once a *till* is paired, since the till is refused a
- * write at that point. That concept doesn't apply here: the dashboard is the
- * cloud, so editing the menu from here is never blocked. Always reporting
- * unpaired keeps those buttons enabled on this build.
- */
-export const cloudAPI = {
-  status: () => Promise.resolve({ paired: false }),
-};
-
 // The till's module exports these for its own token plumbing; the dashboard has
 // none, but the screens import from this module so the names must exist.
 export const setAuthToken = () => {};

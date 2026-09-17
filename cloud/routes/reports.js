@@ -64,6 +64,17 @@ function scopeExpenses(req, alias = 'expenses') {
   return { sql: ` AND ${alias}.branch_id = ?`, params: [branch] };
 }
 
+/** CLOUD: the same, for credit_payments. No till-side per-cashier
+ * equivalent here (that's userScope/creditScope, till-only) — a dashboard
+ * account sees the whole branch's credit collections, same as it sees the
+ * whole branch's orders and expenses. */
+function scopeCreditPayments(req, alias = 'credit_payments') {
+  const pinned = req.user && req.user.branchId;
+  const branch = pinned || Number(req.query.branch) || null;
+  if (!branch) return { sql: '', params: [] };
+  return { sql: ` AND ${alias}.branch_id = ?`, params: [branch] };
+}
+
 function getDateRange(req) {
   // Local wall-clock, not toISOString's UTC — at UTC+5 that named yesterday
   // for the first five hours of every trading day.
@@ -148,6 +159,19 @@ router.get('/kpi', requireUser, async (req, res) => {
        WHERE p.paid_on BETWEEN ?::date AND ?::date${wageScope.sql}
     `, [from, to, ...wageScope.params]);
 
+    // Credit money actually collected in this date range — same reasoning as
+    // backend/routes/reports.js's own copy: separate from total_revenue,
+    // which already booked the credit sale as revenue the moment it was rung
+    // up. This is "cash that came in from old debt today". Missing here
+    // entirely until now, which is why the dashboard's Reports screen always
+    // showed 0 regardless of what the till had actually collected.
+    const creditScope = scopeCreditPayments(req);
+    const creditCollected = await db.one(`
+      SELECT COALESCE(SUM(amount)::float8, 0) AS credit_collected
+        FROM credit_payments
+       WHERE created_at::date BETWEEN ?::date AND ?::date${creditScope.sql}
+    `, [from, to, ...creditScope.params]);
+
     const revenueTrend = prev.total_revenue > 0
       ? (((summary.total_revenue - prev.total_revenue) / prev.total_revenue) * 100).toFixed(1)
       : 0;
@@ -166,6 +190,7 @@ router.get('/kpi', requireUser, async (req, res) => {
       net_revenue: summary.total_revenue - expenses.total_expenses - (Number(wages.wages_paid) || 0),
       revenue_trend: revenueTrend,
       orders_trend: ordersTrend,
+      credit_collected: Number(creditCollected.credit_collected) || 0,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
