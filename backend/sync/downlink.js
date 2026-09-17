@@ -312,6 +312,22 @@ async function pollSettings(config) {
 
 let polling = false;
 
+/**
+ * Every 20s, forever, until the cloud actually has the route this is asking
+ * for — which for a newly-added endpoint (inventory/customers/expenses, the
+ * first time they're deployed somewhere) can be a while. Logging the exact
+ * same failure on every single tick drowned out everything else in this
+ * process's console, menu/staff included. Only the *first* occurrence of a
+ * given failure message is printed; a change (the cloud comes back, or a
+ * different error starts happening) prints again.
+ */
+const lastLoggedError = new Map();
+function logPollError(label, err) {
+  if (lastLoggedError.get(label) === err.message) return;
+  lastLoggedError.set(label, err.message);
+  console.error(`[Cloud] ${label} poll failed:`, err.message);
+}
+
 async function pollOnce() {
   if (polling) return;
   const config = readCloudConfig();
@@ -321,32 +337,32 @@ async function pollOnce() {
   try {
     await pollMenu(config);
   } catch (err) {
-    console.error('[Cloud] Menu poll failed:', err.message);
+    logPollError('Menu', err);
   }
   try {
     await pollStaff(config);
   } catch (err) {
-    console.error('[Cloud] Staff poll failed:', err.message);
+    logPollError('Staff', err);
   }
   try {
     await pollInventory(config);
   } catch (err) {
-    console.error('[Cloud] Inventory poll failed:', err.message);
+    logPollError('Inventory', err);
   }
   try {
     await pollCustomers(config);
   } catch (err) {
-    console.error('[Cloud] Customers poll failed:', err.message);
+    logPollError('Customers', err);
   }
   try {
     await pollExpenses(config);
   } catch (err) {
-    console.error('[Cloud] Expenses poll failed:', err.message);
+    logPollError('Expenses', err);
   }
   try {
     await pollSettings(config);
   } catch (err) {
-    console.error('[Cloud] Settings poll failed:', err.message);
+    logPollError('Settings', err);
   }
   polling = false;
 }

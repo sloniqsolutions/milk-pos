@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { useState, useMemo } from 'react';
-import { Plus, Pencil, Trash2, X, Package, Loader2, GlassWater, Droplet, Coffee } from 'lucide-react';
+import { Plus, Pencil, Trash2, X, Package, Loader2, GlassWater, Droplet, Coffee, Pin } from 'lucide-react';
 import { usePOS } from '@/lib/POSContext';
 import { MENU_CATEGORIES, DEFAULT_CATEGORY } from '@/lib/constants';
 import { useSettings } from '@/lib/SettingsContext';
@@ -23,6 +23,18 @@ const BLUE = '#1B4C82';
 const BLUE_DARK = '#123A66';
 const BLUE_TINT = '#EAF2FB';
 
+/**
+ * The two items every other sized Milk/Dahi item prices off (see
+ * backend/db/menu-pricing.js — "1 Litre" and "Dahi" are the one true
+ * per-litre/per-kilogram rate; 0.5 Litre, 2 Litre, 0.5 KG, 2 KG etc. are all
+ * derived from whichever they belong to and can't be edited independently).
+ * Pinned to the top of the list and badged so it's obvious at a glance which
+ * price actually controls the others.
+ */
+const isUniversalItem = (item) =>
+  (item.category === 'Milk' && item.name === '1 Litre') ||
+  (item.category === 'Dahi' && item.name === 'Dahi');
+
 export default function MenuManagement() {
   const { formatMoney } = useSettings();
   const { isAdmin } = useAuth();
@@ -39,11 +51,14 @@ export default function MenuManagement() {
 
   const visibleItems = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return menuItems;
-    return menuItems.filter(i =>
-      String(i.name || '').toLowerCase().includes(q) ||
-      String(i.category || '').toLowerCase().includes(q)
-    );
+    const filtered = q
+      ? menuItems.filter(i =>
+          String(i.name || '').toLowerCase().includes(q) ||
+          String(i.category || '').toLowerCase().includes(q))
+      : menuItems;
+    // Universal items first, so the price that controls every other
+    // Milk/Dahi size is always the first thing seen in the list.
+    return [...filtered].sort((a, b) => Number(isUniversalItem(b)) - Number(isUniversalItem(a)));
   }, [menuItems, search]);
 
   const openAdd = () => { setEditingItem(null); setModalOpen(true); };
@@ -115,26 +130,42 @@ export default function MenuManagement() {
         {/* Item List */}
         {visibleItems.map(item => {
           const Icon = categoryIcon[item.category] || Package;
+          const universal = isUniversalItem(item);
           return (
             <div
               key={item.id}
               className="flex items-center"
               style={{
-                background: '#FFFFFF',
+                background: universal ? BLUE_TINT : '#FFFFFF',
                 borderRadius: 16,
-                border: '1px solid #E5E9F0',
+                border: `1px solid ${universal ? BLUE : '#E5E9F0'}`,
                 boxShadow: '0 1px 3px rgba(16,40,80,0.06)',
                 padding: 16, marginBottom: 10,
               }}
             >
               <div
                 className="flex items-center justify-center flex-shrink-0"
-                style={{ width: 44, height: 44, borderRadius: 10, background: BLUE_TINT }}
+                style={{ width: 44, height: 44, borderRadius: 10, background: universal ? '#FFFFFF' : BLUE_TINT }}
               >
                 <Icon size={20} color={BLUE} />
               </div>
               <div style={{ marginLeft: 14, flex: 1, minWidth: 0 }}>
-                <div style={{ color: '#0F1720', fontWeight: 700, fontSize: 15 }}>{item.name}</div>
+                <div style={{ color: '#0F1720', fontWeight: 700, fontSize: 15, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  {item.name}
+                  {universal && (
+                    <span
+                      title="Every other Milk/Dahi size is priced off this item"
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 3,
+                        fontSize: 10.5, fontWeight: 700, color: BLUE_DARK,
+                        background: '#FFFFFF', border: `1px solid ${BLUE}`,
+                        borderRadius: 999, padding: '2px 8px',
+                      }}
+                    >
+                      <Pin size={10} /> UNIVERSAL PRICE
+                    </span>
+                  )}
+                </div>
                 <div style={{ color: '#6B7280', fontSize: 12 }}>{item.category}</div>
                 {item.description && (
                   <div

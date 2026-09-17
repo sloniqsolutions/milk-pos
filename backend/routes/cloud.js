@@ -237,10 +237,26 @@ router.post('/restore-from-cloud', requireAdmin, async (req, res) => {
         }
       }
 
-      const insertIngredient = db.prepare(
-        'INSERT INTO ingredients (id, name, unit, stock, low_stock_threshold, cost_per_unit) VALUES (?, ?, ?, ?, ?, ?)');
+      // Upsert, not insert — ingredients is deliberately absent from
+      // clearTables above (recipe_ingredients has a hard FK on ingredients.id,
+      // and recipes/menu items are never touched by a restore either, so
+      // deleting and re-inserting Milk/Yogurt under new rowids would orphan
+      // every recipe that already points at their current ones). Milk and
+      // Yogurt/Dahi already exist locally the moment the app has ever
+      // started (see db/database.js's seed migrations), so this always
+      // updates those two onto the cloud's figures rather than colliding
+      // with them — which is exactly the bug this replaced: a plain INSERT
+      // failed with "UNIQUE constraint failed: ingredients.id" every time,
+      // because id 1 and 3 were never actually free to begin with.
+      const upsertIngredient = db.prepare(`
+        INSERT INTO ingredients (id, name, unit, stock, low_stock_threshold, cost_per_unit)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name, unit = excluded.unit, stock = excluded.stock,
+          low_stock_threshold = excluded.low_stock_threshold, cost_per_unit = excluded.cost_per_unit
+      `);
       for (const i of data.ingredients || []) {
-        insertIngredient.run(i.local_id, i.name, i.unit, i.stock, i.low_stock_threshold, i.cost_per_unit);
+        upsertIngredient.run(i.local_id, i.name, i.unit, i.stock, i.low_stock_threshold, i.cost_per_unit);
       }
 
       const insertShift = db.prepare(`
