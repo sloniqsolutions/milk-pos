@@ -532,6 +532,71 @@ CREATE TABLE IF NOT EXISTS staff_deletions (
   PRIMARY KEY (branch_id, local_id)
 );
 
+-- ----------------------------------------------------- dashboard CRUD -----
+--
+-- Customers, ingredients and expenses used to be till-authoritative only —
+-- the dashboard could read them but never write. Now the dashboard can
+-- create/edit/delete them too, on the same pattern staff and the menu
+-- already use: a version counter per table (poll one integer, download a
+-- snapshot only when it moves), an 'origin' column so a till's routine push
+-- can't silently undo a dashboard edit, and a tombstone table so a
+-- dashboard delete sticks instead of being re-created by the till's next
+-- push.
+--
+-- Ingredient 'stock' is the one field this does NOT cover: a shop's real
+-- physical stock only changes through something that actually happened at
+-- the till (a sale, a delivery entered, a conversion) — the dashboard
+-- editing a number from elsewhere would just make it wrong. So 'origin'
+-- gates name/unit/low_stock_threshold/cost_per_unit; stock keeps updating
+-- from the till's push regardless of who last touched the rest of the row
+-- (see routes/ingest.js's ingredient handler, which updates stock
+-- unconditionally and the rest only when origin allows it). Customer
+-- balance/total_litres/order_count are the same idea: always till-derived,
+-- never dashboard-editable, for the same reason credit balances are
+-- computed rather than stored anywhere else in this codebase.
+
+ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'branch';
+ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS updated_ms BIGINT;
+CREATE TABLE IF NOT EXISTS ingredient_version (
+  id INTEGER PRIMARY KEY DEFAULT 1, version INTEGER NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT ingredient_version_single_row CHECK (id = 1)
+);
+INSERT INTO ingredient_version (id, version) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
+CREATE TABLE IF NOT EXISTS ingredient_deletions (
+  branch_id INTEGER NOT NULL, local_id INTEGER NOT NULL, name TEXT,
+  deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), deleted_by TEXT,
+  PRIMARY KEY (branch_id, local_id)
+);
+
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'branch';
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS updated_ms BIGINT;
+CREATE TABLE IF NOT EXISTS customer_version (
+  id INTEGER PRIMARY KEY DEFAULT 1, version INTEGER NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT customer_version_single_row CHECK (id = 1)
+);
+INSERT INTO customer_version (id, version) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
+CREATE TABLE IF NOT EXISTS customer_deletions (
+  branch_id INTEGER NOT NULL, local_id INTEGER NOT NULL, name TEXT,
+  deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), deleted_by TEXT,
+  PRIMARY KEY (branch_id, local_id)
+);
+
+ALTER TABLE expenses ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'branch';
+ALTER TABLE expenses ADD COLUMN IF NOT EXISTS updated_ms BIGINT;
+CREATE TABLE IF NOT EXISTS expense_version (
+  id INTEGER PRIMARY KEY DEFAULT 1, version INTEGER NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT expense_version_single_row CHECK (id = 1)
+);
+INSERT INTO expense_version (id, version) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
+CREATE TABLE IF NOT EXISTS expense_deletions (
+  branch_id INTEGER NOT NULL, local_id INTEGER NOT NULL, description TEXT,
+  deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), deleted_by TEXT,
+  PRIMARY KEY (branch_id, local_id)
+);
+
 -- ------------------------------------------------------------- pairing --
 --
 -- Short codes that turn a freshly installed till into a particular branch.

@@ -80,11 +80,12 @@ export default function AddMilkDahiModal({ isOpen, onClose, onAdd }) {
 
   if (lastEdited === 'price' && priceNum > 0 && rate > 0) {
     // Floor, never round up — the shop should never end up giving out more
-    // product than the price paid for. Flooring to 2 decimals of the item's
-    // own unit (0.01L, or 0.01 "kg unit" = 10g) keeps this precise without
-    // the old 0.05 snapping.
+    // product than the price paid for. Flooring to 4 decimals of the item's
+    // own unit (0.0001L, or 0.0001 "kg unit" = 0.1g) keeps this precise
+    // without the old 0.05 snapping, and without the coarser 2-decimal floor
+    // rounding away enough product to visibly shortchange a larger order.
     const rawUnits = priceNum / rate;
-    qty = Math.floor(rawUnits * 100) / 100;
+    qty = Math.floor(rawUnits * 10000) / 10000;
     effectivePrice = qty > 0 ? priceNum / qty : rate; // price × qty reproduces priceNum exactly
     displayAmount = qty * unitSize;
     displayPrice = priceNum;
@@ -100,7 +101,7 @@ export default function AddMilkDahiModal({ isOpen, onClose, onAdd }) {
   const handleAdd = () => {
     if (!canAdd) return;
     const label = product === 'Milk'
-      ? `Milk (${qty.toFixed(2)} L)`
+      ? `Milk (${qty.toFixed(4)} L)`
       : `Dahi (${Math.round(qty * unitSize)} g)`;
     onAdd({ id: item.id, name: label, price: effectivePrice, qty });
     onClose();
@@ -156,7 +157,7 @@ export default function AddMilkDahiModal({ isOpen, onClose, onAdd }) {
             </label>
             <input
               type="number" min="0" step="any"
-              value={lastEdited === 'amount' ? amount : (displayAmount ? String(Math.round(displayAmount * 100) / 100) : '')}
+              value={lastEdited === 'amount' ? amount : (displayAmount ? String(Math.round(displayAmount * (product === 'Milk' ? 10000 : 100)) / (product === 'Milk' ? 10000 : 100)) : '')}
               onChange={e => { setLastEdited('amount'); setAmount(e.target.value); }}
               placeholder={product === 'Milk' ? 'e.g. 1.5' : 'e.g. 500'}
               style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #E5E9F0', borderRadius: 8, fontSize: 14, outline: 'none', background: '#F7F9FC', boxSizing: 'border-box' }}
@@ -182,7 +183,7 @@ export default function AddMilkDahiModal({ isOpen, onClose, onAdd }) {
 
         {canAdd && (
           <div style={{ background: BLUE_TINT, borderRadius: 8, padding: '10px 14px', border: '1px solid #C8DCED', fontSize: 13, color: BLUE_DARK }}>
-            Adding <strong>{product}</strong> — {product === 'Milk' ? `${qty.toFixed(2)} L` : `${Math.round(qty * unitSize)} g`} for <strong>{formatMoney(displayPrice)}</strong>
+            Adding <strong>{product}</strong> — {product === 'Milk' ? `${qty.toFixed(4)} L` : `${Math.round(qty * unitSize)} g`} for <strong>{formatMoney(displayPrice)}</strong>
           </div>
         )}
 

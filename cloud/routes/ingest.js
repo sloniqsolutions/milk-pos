@@ -47,7 +47,22 @@ const str = (v) => (v == null ? null : String(v));
  * `RETURNING` is what makes the order_items remap possible in the same trip:
  * it hands back each row's cloud id alongside the till's local_id.
  */
-function buildUpsert(table, columns, rows, valuesFor, receivedAt, branchId, conflictWhere) {
+/**
+ * @param {string|object} [opts] Either a bare `conflictWhere` SQL condition
+ *   string (blocks the WHOLE row's update when false — what staff uses: an
+ *   owner-edited row is never touched by that till's next push again), or
+ *   `{ alwaysCols, gateCondition }` for a table where some columns must
+ *   always take the till's value regardless of who else has touched the
+ *   row — ingredient stock and a customer's derived balance/litres/order
+ *   figures are both like this: real numbers computed at the till that must
+ *   never freeze just because a dashboard edit touched the row's name once.
+ *   `alwaysCols` lists which columns that applies to; every other column in
+ *   `columns` is gated by `gateCondition` instead of the whole row.
+ */
+function buildUpsert(table, columns, rows, valuesFor, receivedAt, branchId, opts) {
+  const options = typeof opts === 'string' ? { conflictWhere: opts } : (opts || {});
+  const { conflictWhere, alwaysCols = [], gateCondition } = options;
+
   const cols = ['branch_id', 'local_id', ...columns, 'received_at'];
   const params = [];
   const tuples = [];
@@ -63,7 +78,15 @@ function buildUpsert(table, columns, rows, valuesFor, receivedAt, branchId, conf
 
   // received_at is refreshed too, so "when did the cloud last hear about this
   // row" stays honest after an update.
-  const updates = [...columns, 'received_at'].map(c => `${c} = EXCLUDED.${c}`).join(', ');
+  const updates = [
+    ...columns.map((c) => {
+      if (gateCondition && !alwaysCols.includes(c)) {
+        return `${c} = CASE WHEN ${gateCondition} THEN EXCLUDED.${c} ELSE ${table}.${c} END`;
+      }
+      return `${c} = EXCLUDED.${c}`;
+    }),
+    'received_at = EXCLUDED.received_at',
+  ].join(', ');
 
   return {
     sql: `
@@ -168,10 +191,10 @@ async function ingestOrders(client, branchId, rows, receivedAt) {
 }
 
 /** The simple tables: one multi-row upsert, no children to remap. */
-function simpleIngest(table, columns, valuesFor, conflictWhere, after) {
+function simpleIngest(table, columns, valuesFor, opts, after) {
   return async (client, branchId, rows, receivedAt) => {
     const { sql, params } = buildUpsert(
-      table, columns, rows, valuesFor, receivedAt, branchId, conflictWhere);
+      table, columns, rows, valuesFor, receivedAt, branchId, opts);
     await client.query(sql, params);
     if (after) await after(client, branchId);
   };
@@ -194,6 +217,23 @@ async function dropDeletedStaff(client, branchId) {
     DELETE FROM staff s
      USING staff_deletions d
      WHERE s.branch_id = ? AND d.branch_id = s.branch_id AND d.local_id = s.local_id
+  `), [branchId]);
+}
+
+/** Same reasoning as dropDeletedStaff, for the two other tables the
+ * dashboard can now delete from — see routes/inventory.js/customers.js. */
+async function dropDeletedIngredients(client, branchId) {
+  await client.query(db.toPg(`
+    DELETE FROM ingredients i
+     USING ingredient_deletions d
+     WHERE i.branch_id = ? AND d.branch_id = i.branch_id AND d.local_id = i.local_id
+  `), [branchId]);
+}
+async function dropDeletedCustomers(client, branchId) {
+  await client.query(db.toPg(`
+    DELETE FROM customers c
+     USING customer_deletions d
+     WHERE c.branch_id = ? AND d.branch_id = c.branch_id AND d.local_id = c.local_id
   `), [branchId]);
 }
 
@@ -228,19 +268,28 @@ const HANDLERS = {
     str(r.name), str(r.role), str(r.color), num(r.active),
   ], "staff.origin <> 'cloud'", dropDeletedStaff),
 
+  // Stock always takes the till's value — it's the one figure here that's a
+  // real physical count, not something the dashboard can edit (see
+  // routes/inventory.js). Name/unit/threshold/cost only update when the
+  // dashboard hasn't claimed the row, same rule staff uses.
   ingredients: simpleIngest('ingredients', INGREDIENT_COLS, r => [
     str(r.name), str(r.unit), num(r.stock), num(r.low_stock_threshold), num(r.cost_per_unit),
-  ]),
+  ], { alwaysCols: ['stock'], gateCondition: "ingredients.origin <> 'cloud'" }, dropDeletedIngredients),
 
-  // The credit customer book. Every figure — including the balance — is
-  // computed on the till (backend/db/customer-summary.js) and simply
-  // carried; there is nothing for the cloud to derive here.
+  // The credit customer book. Balance/litres/order figures are computed on
+  // the till (backend/db/customer-summary.js) and always carried through —
+  // there is nowhere else they could come from. Name/phone/address/notes
+  // only update when the dashboard hasn't claimed the row (see
+  // routes/customers.js).
   customers: simpleIngest('customers', CUSTOMER_COLS, r => [
     str(r.name), str(r.phone), str(r.address), str(r.notes), num(r.active),
     num(r.order_count), num(r.total_spent),
     str(r.first_order_at), str(r.last_order_at),
     num(r.total_credited), num(r.total_paid), num(r.balance), num(r.total_litres),
-  ]),
+  ], {
+    alwaysCols: ['order_count', 'total_spent', 'first_order_at', 'last_order_at', 'total_credited', 'total_paid', 'balance', 'total_litres'],
+    gateCondition: "customers.origin <> 'cloud'",
+  }, dropDeletedCustomers),
 };
 
 /**

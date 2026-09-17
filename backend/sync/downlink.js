@@ -149,6 +149,143 @@ async function pollStaff(config) {
   console.log(`[Cloud] Staff roster updated to version ${snapshot.version}`);
 }
 
+/* ------------------------------------------------------------ inventory -- */
+
+/**
+ * Applies an ingredient snapshot. Matched by id directly (not name, unlike
+ * the menu) — a cloud-created ingredient's local_id already comes from the
+ * 10000+ band (see cloud/routes/inventory.js), so there's no risk of
+ * colliding with this till's own low-numbered ids, and matching by id means
+ * a rename doesn't orphan the row the way name-matching would.
+ *
+ * Stock is deliberately never touched here, even for an ingredient this
+ * till has never seen before — see cloud/routes/inventory.js's own
+ * docstring: physical stock only means something once it's actually been
+ * counted at this till. A brand new cloud-created ingredient arrives at 0,
+ * same as if someone had just added it locally.
+ */
+function applyIngredients(snapshot) {
+  const findLocal = db.prepare('SELECT id FROM ingredients WHERE id = ?');
+  const insertNew = db.prepare(
+    'INSERT INTO ingredients (id, name, unit, stock, low_stock_threshold, cost_per_unit) VALUES (?, ?, ?, 0, ?, ?)'
+  );
+  const updateExisting = db.prepare(
+    'UPDATE ingredients SET name = ?, unit = ?, low_stock_threshold = ?, cost_per_unit = ? WHERE id = ?'
+  );
+  const deleteIngredient = db.prepare('DELETE FROM ingredients WHERE id = ?');
+
+  const apply = db.transaction((ingredients, deleted) => {
+    ingredients.forEach((i) => {
+      if (findLocal.get(i.local_id)) {
+        updateExisting.run(i.name, i.unit, i.low_stock_threshold, i.cost_per_unit, i.local_id);
+      } else {
+        insertNew.run(i.local_id, i.name, i.unit, i.low_stock_threshold, i.cost_per_unit);
+      }
+    });
+    deleted.forEach((id) => deleteIngredient.run(id));
+  });
+
+  apply(snapshot.ingredients || [], snapshot.deleted || []);
+}
+
+async function pollInventory(config) {
+  const local = getLocalVersion('cloud_ingredient_version');
+  const { version } = await getJson(config.cloudUrl, '/api/inventory/version', config.apiKey);
+  if (Number(version) === local) return;
+
+  const snapshot = await getJson(config.cloudUrl, '/api/inventory/snapshot', config.apiKey);
+  applyIngredients(snapshot);
+  setSetting.run('cloud_ingredient_version', String(snapshot.version));
+  console.log(`[Cloud] Ingredients updated to version ${snapshot.version}`);
+}
+
+/* -------------------------------------------------------------- customers --*/
+
+/**
+ * Applies a customer snapshot. Only name/phone/address/notes/active travel
+ * down — balance and every other figure are computed at the till from real
+ * orders and payments (see db/customer-summary.js) and would be actively
+ * wrong to overwrite from a cloud-sent number, even one the cloud itself
+ * only ever got from this same till in the first place.
+ */
+function applyCustomers(snapshot) {
+  const findLocal = db.prepare('SELECT id FROM customers WHERE id = ?');
+  const insertNew = db.prepare(
+    'INSERT INTO customers (id, name, phone, address, notes, active) VALUES (?, ?, ?, ?, ?, ?)'
+  );
+  const updateExisting = db.prepare(
+    'UPDATE customers SET name = ?, phone = ?, address = ?, notes = ?, active = ? WHERE id = ?'
+  );
+  const deleteCustomer = db.prepare('DELETE FROM customers WHERE id = ?');
+
+  const apply = db.transaction((customers, deleted) => {
+    customers.forEach((c) => {
+      const active = c.active ? 1 : 0;
+      if (findLocal.get(c.local_id)) {
+        updateExisting.run(c.name, c.phone, c.address, c.notes, active, c.local_id);
+      } else {
+        insertNew.run(c.local_id, c.name, c.phone, c.address, c.notes, active);
+      }
+    });
+    // A customer with a credit balance was already refused deletion on the
+    // dashboard (see cloud/routes/customers.js), so this never has to choose
+    // between honouring a delete and losing an unpaid balance's history.
+    deleted.forEach((id) => deleteCustomer.run(id));
+  });
+
+  apply(snapshot.customers || [], snapshot.deleted || []);
+}
+
+async function pollCustomers(config) {
+  const local = getLocalVersion('cloud_customer_version');
+  const { version } = await getJson(config.cloudUrl, '/api/customers/version', config.apiKey);
+  if (Number(version) === local) return;
+
+  const snapshot = await getJson(config.cloudUrl, '/api/customers/snapshot', config.apiKey);
+  applyCustomers(snapshot);
+  setSetting.run('cloud_customer_version', String(snapshot.version));
+  console.log(`[Cloud] Customers updated to version ${snapshot.version}`);
+}
+
+/* --------------------------------------------------------------- expenses --*/
+
+/**
+ * Applies an expense snapshot — dashboard-created expenses only (see
+ * cloud/routes/expenses.js's snapshot query), so this never touches a row
+ * this till recorded itself.
+ */
+function applyExpenses(snapshot) {
+  const findLocal = db.prepare('SELECT id FROM expenses WHERE id = ?');
+  const insertNew = db.prepare(
+    'INSERT INTO expenses (id, category, description, amount, staff_name, from_drawer, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)'
+  );
+  const deleteExpense = db.prepare('DELETE FROM expenses WHERE id = ?');
+
+  const apply = db.transaction((expenses, deleted) => {
+    expenses.forEach((e) => {
+      // No edit route exists for expenses (see cloud/routes/expenses.js) —
+      // a dashboard-created row is only ever inserted once, never updated.
+      if (!findLocal.get(e.local_id)) {
+        insertNew.run(e.local_id, e.category, e.description, e.amount, e.staff_name, e.created_at);
+      }
+    });
+    deleted.forEach((id) => deleteExpense.run(id));
+  });
+
+  apply(snapshot.expenses || [], snapshot.deleted || []);
+}
+
+async function pollExpenses(config) {
+  const local = getLocalVersion('cloud_expense_version');
+  const { version } = await getJson(config.cloudUrl, '/api/expenses/version', config.apiKey);
+  if (Number(version) === local) return;
+
+  const snapshot = await getJson(config.cloudUrl, '/api/expenses/snapshot', config.apiKey);
+  applyExpenses(snapshot);
+  setSetting.run('cloud_expense_version', String(snapshot.version));
+  console.log(`[Cloud] Expenses updated to version ${snapshot.version}`);
+}
+
 /* ------------------------------------------------------------ settings -- */
 
 /** Only ever the allow-listed, shop-wide keys — see cloud/routes/settings.js's CLOUD_OWNED. */
@@ -192,6 +329,21 @@ async function pollOnce() {
     console.error('[Cloud] Staff poll failed:', err.message);
   }
   try {
+    await pollInventory(config);
+  } catch (err) {
+    console.error('[Cloud] Inventory poll failed:', err.message);
+  }
+  try {
+    await pollCustomers(config);
+  } catch (err) {
+    console.error('[Cloud] Customers poll failed:', err.message);
+  }
+  try {
+    await pollExpenses(config);
+  } catch (err) {
+    console.error('[Cloud] Expenses poll failed:', err.message);
+  }
+  try {
     await pollSettings(config);
   } catch (err) {
     console.error('[Cloud] Settings poll failed:', err.message);
@@ -207,4 +359,7 @@ function startDownlinkPolling(intervalMs = 20000) {
   return timer;
 }
 
-module.exports = { startDownlinkPolling, pollOnce, applyMenu, applyStaff, applySettings };
+module.exports = {
+  startDownlinkPolling, pollOnce,
+  applyMenu, applyStaff, applySettings, applyIngredients, applyCustomers, applyExpenses,
+};

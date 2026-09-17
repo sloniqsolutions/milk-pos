@@ -28,9 +28,15 @@ router.post('/', (req, res) => {
   }
 
   try {
-    const insert = db.prepare('INSERT INTO ingredients (name, unit, stock, low_stock_threshold) VALUES (?, ?, ?, ?)');
+    // Explicit id under 10000 — see backend/routes/staff.js's identical
+    // comment for why: the cloud allocates its own ingredient ids from
+    // 10000 up (see cloud/routes/inventory.js), and once this till has ever
+    // pulled down a cloud-created ingredient, SQLite's own rowid allocation
+    // would otherwise continue from that high-water mark instead of 1.
+    const nextId = db.prepare('SELECT COALESCE(MAX(id), 0) + 1 AS id FROM ingredients WHERE id < 10000').get().id;
+    const insert = db.prepare('INSERT INTO ingredients (id, name, unit, stock, low_stock_threshold) VALUES (?, ?, ?, ?, ?)');
     const startingStock = stock || 0;
-    const result = insert.run(name, unit, startingStock, low_stock_threshold || 0);
+    const result = insert.run(nextId, name, unit, startingStock, low_stock_threshold || 0);
     if (startingStock > 0) {
       recordEntry.run(result.lastInsertRowid, 'stock', startingStock, date || today());
     }

@@ -98,8 +98,11 @@ export const liveAPI = {
 export const expensesAPI = {
   list: (params = {}) => request('GET', `/expenses${qs(params)}`),
   categories: () => request('GET', '/expenses/categories'),
-  create: readOnly('An expense'),
-  remove: readOnly('An expense'),
+  // Real writes now — see cloud/routes/expenses.js. branch_id injected the
+  // same way staffAPI.create does below: this dashboard is mono-branch, and
+  // the reused ExpensesScreen.jsx form has no branch field to send one from.
+  create: (data) => request('POST', '/expenses', { branch_id: 1, ...data }),
+  remove: (id) => request('DELETE', `/expenses/1/${id}`),
 };
 
 export const shiftsAPI = {
@@ -177,10 +180,14 @@ export const inventoryAPI = {
   getAll: () => request('GET', '/inventory'),
   lowStock: () => request('GET', '/inventory').then(
     rows => rows.filter(r => Number(r.stock) <= Number(r.low_stock_threshold))),
-  create: readOnly('Stock'),
+  // Real writes now for everything except stock itself — see
+  // cloud/routes/inventory.js for why stock stays till-only (it's a real
+  // physical count; the dashboard isn't at the shop to have counted it).
+  // branch_id injected the same way staffAPI.create does below.
+  create: (data) => request('POST', '/inventory', { branch_id: 1, ...data }),
   updateStock: readOnly('Stock'),
-  updateThreshold: readOnly('Stock'),
-  delete: readOnly('Stock'),
+  updateThreshold: (id, threshold) => request('PUT', `/inventory/1/${id}`, { low_stock_threshold: threshold }),
+  delete: (id) => request('DELETE', `/inventory/1/${id}`),
   // Stock history, yogurt conversion and waste reporting are till-only too —
   // same reasoning as the rest of this object. Stubbed so InventoryScreen's
   // buttons fail with the same explanatory message instead of a raw

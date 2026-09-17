@@ -102,11 +102,17 @@ router.post('/', (req, res) => {
 
     const fromDrawer = from_drawer === false || from_drawer === 0 ? 0 : 1;
 
+    // Explicit id under 10000 — see backend/routes/staff.js's identical
+    // comment for why: the cloud allocates its own expense ids from 10000
+    // up (see cloud/routes/expenses.js).
+    const nextId = db.prepare('SELECT COALESCE(MAX(id), 0) + 1 AS id FROM expenses WHERE id < 10000').get().id;
+
     const info = db.prepare(`
       INSERT INTO expenses
-        (shift_id, staff_id, staff_name, category, description, amount, from_drawer, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+        (id, shift_id, staff_id, staff_name, category, description, amount, from_drawer, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
     `).run(
+      nextId,
       openShift.id,
       // Attribution comes from the session, never the request body.
       (req.user && req.user.staffId) || null,

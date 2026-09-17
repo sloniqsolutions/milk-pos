@@ -605,6 +605,68 @@ try {
   console.error('Migration for Dahi menu item failed:', e.message);
 }
 
+/*
+ * Migration: seed "0.5 KG" and "2 KG" Dahi sizes, the same pack-size pattern
+ * Milk already has (0.5 Litre / 1 Litre / 2 Litre) — see the "3 Milk items"
+ * migration above. Priced off the "Dahi" universal item at seed time (not
+ * hardcoded), same rule db/menu-pricing.js enforces on every later edit: a
+ * sized item's price is always universal price × its own size factor. Not
+ * using menu-pricing.js's derivedPriceFor here directly — requiring it from
+ * inside this file, which menu-pricing.js itself requires database.js from,
+ * would be a circular require that runs mid-way through this file's own
+ * execution, before `module.exports` is set — so the tiny bit of arithmetic
+ * it would have done is just inlined instead.
+ */
+try {
+  const done = db.prepare("SELECT value FROM settings WHERE key = 'migration_dahi_sizes_v1'").get();
+  if (!done) {
+    db.transaction(() => {
+      const yogurtIng = db.prepare("SELECT id FROM ingredients WHERE name = 'Yogurt'").get();
+      const universalDahi = db.prepare("SELECT price FROM menu_items WHERE name = 'Dahi' AND category = 'Dahi'").get();
+      const perKg = universalDahi ? Number(universalDahi.price) : 300;
+
+      const sizes = [
+        { name: '0.5 KG', factor: 0.5, grams: 500, desc: 'Fresh yogurt, made in-house from milk (500g)' },
+        { name: '2 KG', factor: 2, grams: 2000, desc: 'Fresh yogurt, made in-house from milk (2kg)' },
+      ];
+
+      sizes.forEach(({ name, factor, grams, desc }) => {
+        const price = Math.round(perKg * factor);
+        let item = db.prepare("SELECT id FROM menu_items WHERE name = ? AND category = 'Dahi'").get(name);
+        let itemId;
+        if (!item) {
+          itemId = db.prepare(
+            "INSERT INTO menu_items (name, category, price, has_variants, description, active) VALUES (?, 'Dahi', ?, 0, ?, 1)"
+          ).run(name, price, desc).lastInsertRowid;
+        } else {
+          itemId = item.id;
+          db.prepare("UPDATE menu_items SET price = ?, active = 1 WHERE id = ?").run(price, itemId);
+        }
+
+        const existingRecipe = db.prepare("SELECT id FROM recipes WHERE menu_item_id = ?").get(itemId);
+        let recipeId;
+        if (!existingRecipe) {
+          recipeId = db.prepare("INSERT INTO recipes (menu_item_id, variant_id) VALUES (?, NULL)").run(itemId).lastInsertRowid;
+        } else {
+          recipeId = existingRecipe.id;
+          db.prepare("DELETE FROM recipe_ingredients WHERE recipe_id = ?").run(recipeId);
+        }
+
+        if (yogurtIng) {
+          db.prepare(
+            "INSERT INTO recipe_ingredients (recipe_id, ingredient_id, quantity_required) VALUES (?, ?, ?)"
+          ).run(recipeId, yogurtIng.id, grams);
+        }
+      });
+
+      db.prepare("INSERT INTO settings (key, value) VALUES ('migration_dahi_sizes_v1', '1') ON CONFLICT(key) DO UPDATE SET value = '1'").run();
+    })();
+    console.log('Dahi sizes (0.5 KG / 2 KG) migration applied successfully.');
+  }
+} catch (e) {
+  console.error('Migration for Dahi sizes failed:', e.message);
+}
+
 // ─── Auto Backup ────────────────────────────────────────────────────────────
 const backupDir = path.join(userDataDir, 'backups');
 if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });

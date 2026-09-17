@@ -114,6 +114,18 @@ app.use('/api/branches', require('./routes/branches'));
 app.use('/api/staff', require('./routes/staff'));
 
 /*
+ * Ingredients, credit customers and expenses — the dashboard can now
+ * create/edit/delete these too (see each file's own docstring for exactly
+ * what stays till-derived: ingredient stock, customer balance/litres).
+ * Mounted ahead of branch-data for the same reason staff is: each answers
+ * under the same base path branch-data's own read-only GET already used,
+ * and only the write routes plus /version and /snapshot are defined here.
+ */
+app.use('/api/inventory', require('./routes/inventory'));
+app.use('/api/customers', require('./routes/customers'));
+app.use('/api/expenses', require('./routes/expenses'));
+
+/*
  * Payroll. The dashboard and nowhere else.
  *
  * There is no branch-key route in here and no downlink: wages never travel to

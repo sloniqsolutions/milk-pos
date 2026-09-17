@@ -81,9 +81,14 @@ router.post('/', (req, res) => {
   }
 
   try {
+    // Explicit id under 10000 — see backend/routes/staff.js's identical
+    // comment for why: the cloud allocates its own customer ids from 10000
+    // up (see cloud/routes/customers.js).
+    const nextId = db.prepare('SELECT COALESCE(MAX(id), 0) + 1 AS id FROM customers WHERE id < 10000').get().id;
     const result = db.prepare(
-      'INSERT INTO customers (name, phone, address, notes) VALUES (?, ?, ?, ?)'
+      'INSERT INTO customers (id, name, phone, address, notes) VALUES (?, ?, ?, ?, ?)'
     ).run(
+      nextId,
       String(name).trim(),
       (phone && String(phone).trim()) || null,
       (address && String(address).trim()) || null,
