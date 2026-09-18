@@ -112,6 +112,97 @@ router.get('/kpi', (req, res) => {
   }
 });
 
+/**
+ * Stock movement, by day and ingredient — the Reports screen's "Summary"
+ * tab's own dedicated table (and the full-screen report built from the same
+ * data), reading off the same inventory_entries rows as the kpi route's
+ * ingredient_usage card. `sold`/`restocked`/`converted`/`waste` are each
+ * day's own totals; `closing_balance` and `days_remaining` are not — they
+ * need the ingredient's full history, not just the selected range, so they
+ * are computed here in JS rather than as part of the grouped SQL below.
+ */
+router.get('/stock-movement', (req, res) => {
+  const { from, to } = getDateRange(req);
+  try {
+    const ingredients = db.prepare('SELECT id, name, unit, stock FROM ingredients ORDER BY name').all();
+    const ingredientById = {};
+    ingredients.forEach((i) => { ingredientById[i.id] = i; });
+
+    // Every day this ingredient ever moved, most recent first — walking this
+    // backward from today's live stock is what turns "current stock" into
+    // "what it was as of any earlier day," the same way a bank statement's
+    // running balance works in reverse.
+    const allDeltas = db.prepare(`
+      SELECT ingredient_id, entry_date, SUM(amount) AS delta
+        FROM inventory_entries
+       GROUP BY ingredient_id, entry_date
+       ORDER BY entry_date DESC
+    `).all();
+    const deltasByIngredient = {};
+    allDeltas.forEach((r) => {
+      if (!deltasByIngredient[r.ingredient_id]) deltasByIngredient[r.ingredient_id] = [];
+      deltasByIngredient[r.ingredient_id].push({ date: r.entry_date, delta: Number(r.delta) || 0 });
+    });
+    function closingBalance(ingredientId, currentStock, date) {
+      let balance = currentStock;
+      for (const d of (deltasByIngredient[ingredientId] || [])) {
+        if (d.date > date) balance -= d.delta;
+      }
+      return balance;
+    }
+
+    const movement = db.prepare(`
+      SELECT ie.entry_date AS date, i.id AS ingredient_id, i.name, i.unit,
+             COALESCE(-SUM(CASE WHEN ie.type = 'sale' THEN ie.amount ELSE 0 END), 0) AS sold,
+             COALESCE(SUM(CASE WHEN ie.type = 'stock' AND ie.amount > 0 THEN ie.amount ELSE 0 END), 0) AS restocked,
+             COALESCE(SUM(CASE WHEN ie.type = 'yogurt_conversion' THEN ie.amount ELSE 0 END), 0) AS converted,
+             COALESCE(-SUM(CASE WHEN ie.type = 'waste' THEN ie.amount ELSE 0 END), 0) AS waste
+        FROM inventory_entries ie
+        JOIN ingredients i ON i.id = ie.ingredient_id
+       WHERE DATE(ie.entry_date) BETWEEN DATE(?) AND DATE(?)
+       GROUP BY ie.entry_date, i.id, i.name, i.unit
+       ORDER BY ie.entry_date ASC, i.name
+    `).all(from, to);
+
+    // Days-of-stock-remaining is projected off this same date range's own
+    // average daily sales — widening the range changes the projection the
+    // same way it changes every other figure on this report, rather than
+    // hiding a second, differently-scoped window behind one number.
+    const daysInRange = Math.max(1, Math.round((new Date(to) - new Date(from)) / 86400000) + 1);
+    const totalSoldByIngredient = {};
+    movement.forEach((r) => {
+      totalSoldByIngredient[r.ingredient_id] = (totalSoldByIngredient[r.ingredient_id] || 0) + Number(r.sold);
+    });
+
+    const rows = movement.map((r) => {
+      const ingredient = ingredientById[r.ingredient_id];
+      // Clamped the same way live stock itself is (routes/orders.js,
+      // routes/inventory.js both floor at 0): entries from before this shop
+      // was really trading include large round test/setup figures (a single
+      // multi-kilogram "waste" entry, for instance) that a reconstructed
+      // running balance has no way to tell apart from a real one, and that
+      // can walk the math below zero for an old date. Real stock never was
+      // negative; showing it that way would just be confusing, not honest.
+      const rawBalance = ingredient ? closingBalance(r.ingredient_id, Number(ingredient.stock), r.date) : null;
+      const balance = rawBalance != null ? Math.max(0, rawBalance) : null;
+      const sold = Number(r.sold);
+      const waste = Number(r.waste);
+      const wastePct = (sold + waste) > 0 ? (waste / (sold + waste)) * 100 : 0;
+      const avgDailySold = (totalSoldByIngredient[r.ingredient_id] || 0) / daysInRange;
+      const daysRemaining = avgDailySold > 0 && balance != null && balance > 0 ? balance / avgDailySold : null;
+      return {
+        date: r.date, ingredient_id: r.ingredient_id, name: r.name, unit: r.unit,
+        sold, restocked: Number(r.restocked), converted: Number(r.converted), waste,
+        waste_pct: wastePct, closing_balance: balance, days_remaining: daysRemaining,
+      };
+    });
+
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Revenue over time
 router.get('/revenue-over-time', (req, res) => {
   const { from, to } = getDateRange(req);

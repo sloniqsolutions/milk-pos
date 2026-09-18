@@ -163,6 +163,10 @@ export const reportsAPI = {
   /** One row per item sold, for the item-level CSV export. */
   lineItems: (params: ReportParams) => request<Record<string, unknown>[]>('GET', `/reports/line-items?${new URLSearchParams(params as Record<string, string>).toString()}`),
   net: (params: ReportParams) => request<{ revenue: number; expenses: number; net: number }>('GET', `/reports/net?${new URLSearchParams(params as Record<string, string>).toString()}`),
+  /** One row per day per ingredient — sold/restocked/converted/waste that day,
+   * plus closing stock and a days-remaining projection. See
+   * backend/routes/reports.js's own /stock-movement for the full reasoning. */
+  stockMovement: (params: ReportParams) => request<Record<string, unknown>[]>('GET', `/reports/stock-movement?${new URLSearchParams(params as Record<string, string>).toString()}`),
 };
 
 export const settingsAPI = {

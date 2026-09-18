@@ -82,6 +82,8 @@ export const reportsAPI = {
   // method throws and the whole batch rejects, so the Reports tab loads
   // nothing at all rather than just missing a net-revenue figure.
   net: (p) => request('GET', `/reports/net${qs(p)}`),
+  // See backend/routes/reports.js's own /stock-movement.
+  stockMovement: (p) => request('GET', `/reports/stock-movement${qs(p)}`),
 };
 
 export const branchesAPI = {

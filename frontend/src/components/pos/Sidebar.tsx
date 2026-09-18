@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Home as HomeIcon, User, ClipboardList, BarChart2, Settings, LogOut, GlassWater, Package, Clock, Wallet, Users, History } from 'lucide-react';
+import { Home as HomeIcon, User, ClipboardList, BarChart2, Settings, LogOut, GlassWater, Package, Clock, Wallet, Users, History, FileText } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { shiftsAPI } from '@/api/index';
 import useDialogs from '@/lib/useDialogs';
@@ -23,6 +23,7 @@ interface SidebarProps {
 
 const ADMIN_NAV: NavItem[] = [
   { id: 'reports',  icon: BarChart2,     label: 'Reports' },
+  { id: 'summary-report', icon: FileText, label: 'Summary' },
   { id: 'orders',   icon: ClipboardList, label: 'Orders' },
   { id: 'customers',icon: Users,         label: 'Customers' },
   { id: 'menu',     icon: GlassWater,    label: 'Menu',      adminOnly: true },
@@ -45,6 +46,7 @@ const MANAGER_NAV: NavItem[] = [
   { id: 'shifts',   icon: Clock,         label: 'Shifts' },
   { id: 'expenses', icon: Wallet,        label: 'Expenses' },
   { id: 'reports',  icon: BarChart2,     label: 'Reports' },
+  { id: 'summary-report', icon: FileText, label: 'Summary' },
 ];
 
 export default function Sidebar({ activePage, onNavigate }: SidebarProps) {

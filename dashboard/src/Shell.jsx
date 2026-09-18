@@ -8,6 +8,7 @@ import { SettingsProvider } from '@/lib/SettingsContext';
 // The POS's own screens, rendered here rather than reimplemented. See
 // vite.config.js for how their three environment-specific imports are replaced.
 import Reports from '@/pages/Reports';
+import SummaryReportScreen from '@/pages/SummaryReportScreen';
 import ExpensesScreen from '@/pages/ExpensesScreen';
 import ShiftsScreen from '@/pages/ShiftsScreen';
 import Cashier from '@/pages/Cashier';
@@ -30,6 +31,7 @@ import BackupsScreen from './BackupsScreen';
 const TABS = [
   { key: 'live', label: 'Live', Screen: null },
   { key: 'reports', label: 'Reports', Screen: Reports },
+  { key: 'summary-report', label: 'Summary', Screen: SummaryReportScreen },
   { key: 'orders', label: 'Orders', Screen: OrdersScreen },
   { key: 'customers', label: 'Customers', Screen: CustomersScreen },
   { key: 'expenses', label: 'Expenses', Screen: ExpensesScreen },
@@ -177,7 +179,7 @@ export default function Shell({ user, onSignOut }) {
                  * the screen with no way to scroll to it. See styles.css.
                  */
                 <div className="pos-screen">
-                  <active.Screen />
+                  <active.Screen onNavigate={setTab} />
                 </div>
               )}
 

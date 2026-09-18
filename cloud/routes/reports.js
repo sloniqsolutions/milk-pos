@@ -218,6 +218,82 @@ router.get('/kpi', requireUser, async (req, res) => {
   }
 });
 
+/**
+ * Stock movement, by day and ingredient — CLOUD port of
+ * backend/routes/reports.js's own /stock-movement, same reasoning and same
+ * clamp-at-zero note on closing_balance. Kept as close to the till's copy as
+ * the Postgres dialect allows, same as every other route in this file.
+ */
+router.get('/stock-movement', requireUser, async (req, res) => {
+  const { from, to } = getDateRange(req);
+  const branchId = (req.user && req.user.branchId) || Number(req.query.branch) || 1;
+  try {
+    const ingredients = await db.q(
+      'SELECT local_id AS id, name, unit, stock FROM ingredients WHERE branch_id = ? ORDER BY name', [branchId]);
+    const ingredientById = {};
+    ingredients.forEach((i) => { ingredientById[i.id] = i; });
+
+    const allDeltas = await db.q(`
+      SELECT ingredient_local_id AS ingredient_id, entry_date, SUM(amount)::float8 AS delta
+        FROM inventory_entries
+       WHERE branch_id = ?
+       GROUP BY ingredient_local_id, entry_date
+       ORDER BY entry_date DESC
+    `, [branchId]);
+    const deltasByIngredient = {};
+    allDeltas.forEach((r) => {
+      if (!deltasByIngredient[r.ingredient_id]) deltasByIngredient[r.ingredient_id] = [];
+      deltasByIngredient[r.ingredient_id].push({ date: r.entry_date, delta: Number(r.delta) || 0 });
+    });
+    function closingBalance(ingredientId, currentStock, date) {
+      let balance = currentStock;
+      for (const d of (deltasByIngredient[ingredientId] || [])) {
+        if (d.date > date) balance -= d.delta;
+      }
+      return balance;
+    }
+
+    const movement = await db.q(`
+      SELECT ie.entry_date AS date, i.local_id AS ingredient_id, i.name, i.unit,
+             COALESCE(-SUM(CASE WHEN ie.type = 'sale' THEN ie.amount ELSE 0 END)::float8, 0) AS sold,
+             COALESCE(SUM(CASE WHEN ie.type = 'stock' AND ie.amount > 0 THEN ie.amount ELSE 0 END)::float8, 0) AS restocked,
+             COALESCE(SUM(CASE WHEN ie.type = 'yogurt_conversion' THEN ie.amount ELSE 0 END)::float8, 0) AS converted,
+             COALESCE(-SUM(CASE WHEN ie.type = 'waste' THEN ie.amount ELSE 0 END)::float8, 0) AS waste
+        FROM inventory_entries ie
+        JOIN ingredients i ON i.branch_id = ie.branch_id AND i.local_id = ie.ingredient_local_id
+       WHERE ie.branch_id = ? AND ie.entry_date::date BETWEEN ?::date AND ?::date
+       GROUP BY ie.entry_date, i.local_id, i.name, i.unit
+       ORDER BY ie.entry_date ASC, i.name
+    `, [branchId, from, to]);
+
+    const daysInRange = Math.max(1, Math.round((new Date(to) - new Date(from)) / 86400000) + 1);
+    const totalSoldByIngredient = {};
+    movement.forEach((r) => {
+      totalSoldByIngredient[r.ingredient_id] = (totalSoldByIngredient[r.ingredient_id] || 0) + Number(r.sold);
+    });
+
+    const rows = movement.map((r) => {
+      const ingredient = ingredientById[r.ingredient_id];
+      const rawBalance = ingredient ? closingBalance(r.ingredient_id, Number(ingredient.stock), r.date) : null;
+      const balance = rawBalance != null ? Math.max(0, rawBalance) : null;
+      const sold = Number(r.sold);
+      const waste = Number(r.waste);
+      const wastePct = (sold + waste) > 0 ? (waste / (sold + waste)) * 100 : 0;
+      const avgDailySold = (totalSoldByIngredient[r.ingredient_id] || 0) / daysInRange;
+      const daysRemaining = avgDailySold > 0 && balance != null && balance > 0 ? balance / avgDailySold : null;
+      return {
+        date: r.date, ingredient_id: r.ingredient_id, name: r.name, unit: r.unit,
+        sold, restocked: Number(r.restocked), converted: Number(r.converted), waste,
+        waste_pct: wastePct, closing_balance: balance, days_remaining: daysRemaining,
+      };
+    });
+
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Revenue over time
 router.get('/revenue-over-time', requireUser, async (req, res) => {
   const { from, to } = getDateRange(req);

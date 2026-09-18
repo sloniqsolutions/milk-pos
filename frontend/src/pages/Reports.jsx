@@ -2,6 +2,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { DollarSign, ShoppingBag, TrendingUp, Tag, Wallet, Printer, Download, FileSpreadsheet, CreditCard, Droplet, Package } from 'lucide-react';
 import { reportsAPI } from '@/api/index';
+import StockMovementTable from '@/components/StockMovementTable';
 import { buildCsv, money } from '@/lib/csv';
 import { useSettings } from '@/lib/SettingsContext';
 import { useAuth } from '@/context/AuthContext';
@@ -37,7 +38,7 @@ const FILTER_CHIPS = [
   { label: 'Custom Range', value: 'custom' },
 ];
 
-export default function Reports() {
+export default function Reports({ onNavigate }) {
   const [activeFilter, setActiveFilter] = useState('last7');
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
@@ -51,6 +52,7 @@ export default function Reports() {
   const [heatmapData, setHeatmapData] = useState([]);
   const [cashierPerformance, setCashierPerformance] = useState([]);
   const [detailedReport, setDetailedReport] = useState([]);
+  const [stockMovement, setStockMovement] = useState([]);
     const [lineItems, setLineItems] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -91,7 +93,7 @@ export default function Reports() {
     setLoadError(null);
     try {
       const params = { from, to };
-      const [kData, rData, tData, cData, hData, cpData, dData, liData, nData] = await Promise.all([
+      const [kData, rData, tData, cData, hData, cpData, dData, liData, nData, smData] = await Promise.all([
         reportsAPI.kpi(params),
         reportsAPI.revenueOverTime({ ...params, groupBy: activeFilter === 'today' ? 'hour' : 'day' }),
         reportsAPI.topItems(params),
@@ -100,7 +102,8 @@ export default function Reports() {
         reportsAPI.cashierPerformance(params),
         reportsAPI.detailed(params),
         reportsAPI.lineItems(params),
-        reportsAPI.net(params)
+        reportsAPI.net(params),
+        reportsAPI.stockMovement(params),
       ]);
       
       // Transform backend data to match frontend expectations
@@ -113,7 +116,8 @@ export default function Reports() {
         ingredient_usage: Array.isArray(kData.ingredient_usage) ? kData.ingredient_usage : []
       });
       setNet(nData);
-      
+      setStockMovement(Array.isArray(smData) ? smData : []);
+
       setRevenueData(rData.map(d => ({ ...d, date: d.period })));
       
       setTopItems(tData.map(d => ({ ...d, quantity: d.total_qty })));
@@ -843,6 +847,32 @@ export default function Reports() {
                 Use Export below for the complete list.
               </p>
             )}
+          </div>
+
+          {/*
+            Stock movement — Milk/Dahi sold, restocked, converted and wasted
+            by day, plus what's left. Shown here inline, right under the
+            sales summary it shares a date range with, rather than only in
+            the full-screen version below: the point of a "before opening
+            it should be showing too" preview is that nobody has to leave
+            this page to see how the day's stock moved.
+          */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 print:hidden">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="text-lg font-bold text-gray-900">Stock Movement</h2>
+                <p className="text-sm text-gray-500">Milk and Dahi — sold, restocked, converted and wasted, {from} to {to}</p>
+              </div>
+              {onNavigate && (
+                <button
+                  onClick={() => onNavigate('summary-report')}
+                  className="px-4 py-2 rounded-lg text-sm font-semibold border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
+                >
+                  View Full Report
+                </button>
+              )}
+            </div>
+            <StockMovementTable rows={stockMovement} loading={isLoading} />
           </div>
 
           {/*
