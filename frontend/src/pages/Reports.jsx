@@ -66,7 +66,22 @@ export default function Reports({ onNavigate }) {
   // hard boundary — the settings and menu routes are the enforced ones.
   const { isAdmin } = useAuth();
   const restaurantName = restaurant.name || 'Pure Milk';
-  
+
+  // Same grouping the inline Summary table below used to do itself —
+  // pulled out so it can also feed StockMovementTable's merged view.
+  const salesByDay = useMemo(() => {
+    const byDate = {};
+    detailedReport.forEach((row) => {
+      const date = moment(row.created_at).format('YYYY-MM-DD');
+      if (!byDate[date]) byDate[date] = { date, orders: 0, revenue: 0, discounts: 0, net: 0 };
+      byDate[date].orders += 1;
+      byDate[date].revenue += Number(row.subtotal) || 0;
+      byDate[date].discounts += Number(row.discount) || 0;
+      byDate[date].net += Number(row.total) || 0;
+    });
+    return Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+  }, [detailedReport]);
+
   // Calculate dates based on filter
   const { from, to } = useMemo(() => {
     if (activeFilter === 'custom') return { from: customFrom, to: customTo };
@@ -727,18 +742,15 @@ export default function Reports({ onNavigate }) {
               <p className="text-sm text-gray-500">{from} to {to}</p>
             </div>
             
+            {reportFormat === 'summary' ? (
+              // Sales and stock movement together — see StockMovementTable's
+              // own note on why these are one merged table rather than two.
+              <StockMovementTable salesByDay={salesByDay} stockMovement={stockMovement} formatMoney={formatMoney} loading={isLoading} />
+            ) : (
             <table className="w-full text-left border-collapse text-sm">
               <thead>
                 <tr className="bg-gray-50 text-gray-500 uppercase text-[11px] font-bold border-b border-gray-200">
-                  {reportFormat === 'summary' ? (
-                    <>
-                      <th className="py-3 px-4">Date</th>
-                      <th className="py-3 px-4 text-center">Total Orders</th>
-                      <th className="py-3 px-4 text-right">Gross Sales</th>
-                      <th className="py-3 px-4 text-right">Discounts</th>
-                      <th className="py-3 px-4 text-right text-orange-600">Net Revenue</th>
-                    </>
-                  ) : reportFormat === 'items' ? (
+                  {reportFormat === 'items' ? (
                     <>
                       <th className="py-3 px-4">Order #</th>
                       <th className="py-3 px-4">Time</th>
@@ -763,32 +775,7 @@ export default function Reports({ onNavigate }) {
                 </tr>
               </thead>
               <tbody>
-                {reportFormat === 'summary' ? (
-                  // Group by date
-                  Object.entries(
-                    detailedReport.reduce((acc, row) => {
-                      const date = moment(row.created_at).format('YYYY-MM-DD');
-                      if (!acc[date]) acc[date] = { date, orders: 0, revenue: 0, discounts: 0, net: 0 };
-                      acc[date].orders += 1;
-                      // Gross (pre-discount) vs net (what was actually taken).
-                      // These were both summing `total`, so the two money
-                      // columns always matched and the discount column between
-                      // them reconciled with neither.
-                      acc[date].revenue += Number(row.subtotal) || 0;
-                      acc[date].discounts += Number(row.discount) || 0;
-                      acc[date].net += Number(row.total) || 0;
-                      return acc;
-                    }, {})
-                  ).sort((a,b) => a[0].localeCompare(b[0])).map(([date, d], i) => (
-                    <tr key={date} className={`border-b border-gray-100 ${i % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
-                      <td className="py-3 px-4 font-medium text-gray-900">{moment(date).format('MMM D, YYYY')}</td>
-                      <td className="py-3 px-4 text-center text-gray-600">{d.orders}</td>
-                      <td className="py-3 px-4 text-right text-gray-600">{formatMoney(d.revenue)}</td>
-                      <td className="py-3 px-4 text-right text-red-500">-{formatMoney(d.discounts)}</td>
-                      <td className="py-3 px-4 text-right font-bold text-gray-900">{formatMoney(d.net)}</td>
-                    </tr>
-                  ))
-                ) : reportFormat === 'items' ? (
+                {reportFormat === 'items' ? (
                   // Item Sales view — one row per item sold.
                   lineItems.slice(0, TABLE_ROW_CAP).map((row, i) => (
                     <tr key={`${row.order_id}-${i}`} className={`border-b border-gray-100 ${i % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
@@ -833,13 +820,14 @@ export default function Reports({ onNavigate }) {
                 )}
                 {(reportFormat === 'items' ? lineItems.length : detailedReport.length) === 0 && (
                   <tr>
-                    <td colSpan={reportFormat === 'summary' ? 5 : reportFormat === 'items' ? 7 : 8} className="py-8 text-center text-gray-400">
+                    <td colSpan={reportFormat === 'items' ? 7 : 8} className="py-8 text-center text-gray-400">
                       No orders found for this date range.
                     </td>
                   </tr>
                 )}
               </tbody>
             </table>
+            )}
             {reportFormat !== 'summary' && (reportFormat === 'items' ? lineItems.length : detailedReport.length) > TABLE_ROW_CAP && (
               <p className="text-center text-xs text-gray-400 py-3 print:hidden">
                 Showing the first {TABLE_ROW_CAP.toLocaleString()} of{' '}
@@ -847,32 +835,16 @@ export default function Reports({ onNavigate }) {
                 Use Export below for the complete list.
               </p>
             )}
-          </div>
-
-          {/*
-            Stock movement — Milk/Dahi sold, restocked, converted and wasted
-            by day, plus what's left. Shown here inline, right under the
-            sales summary it shares a date range with, rather than only in
-            the full-screen version below: the point of a "before opening
-            it should be showing too" preview is that nobody has to leave
-            this page to see how the day's stock moved.
-          */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 print:hidden">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h2 className="text-lg font-bold text-gray-900">Stock Movement</h2>
-                <p className="text-sm text-gray-500">Milk and Dahi — sold, restocked, converted and wasted, {from} to {to}</p>
-              </div>
-              {onNavigate && (
+            {onNavigate && reportFormat === 'summary' && (
+              <div className="flex justify-end mt-4 print:hidden">
                 <button
                   onClick={() => onNavigate('summary-report')}
                   className="px-4 py-2 rounded-lg text-sm font-semibold border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
                 >
                   View Full Report
                 </button>
-              )}
-            </div>
-            <StockMovementTable rows={stockMovement} loading={isLoading} />
+              </div>
+            )}
           </div>
 
           {/*

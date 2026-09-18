@@ -128,27 +128,47 @@ router.get('/stock-movement', (req, res) => {
     const ingredientById = {};
     ingredients.forEach((i) => { ingredientById[i.id] = i; });
 
-    // Every day this ingredient ever moved, most recent first — walking this
-    // backward from today's live stock is what turns "current stock" into
-    // "what it was as of any earlier day," the same way a bank statement's
-    // running balance works in reverse.
+    // Every day this ingredient moved from `from` onward, most recent first.
+    // Nothing before `from` is fetched — no report row ever needs a balance
+    // for a date earlier than that, so entries before it can never be "after"
+    // one that matters here.
+    //
+    // closingBalance used to rescan this whole list once per report row —
+    // fine the day this shipped, ruinous a few months in once "every day
+    // this ingredient ever moved" is thousands of rows: that's an O(rows ×
+    // history) synchronous loop with no I/O in it, which blocks Node's one
+    // event loop for the whole time it runs. Nothing else the process was
+    // serving — including totally unrelated requests like GET /settings —
+    // could get a look in until it finished, which is what actually caused
+    // a batch of live browser requests to time out. A single backward pass
+    // below computes every date's balance in one go instead.
     const allDeltas = db.prepare(`
       SELECT ingredient_id, entry_date, SUM(amount) AS delta
         FROM inventory_entries
+       WHERE entry_date >= ?
        GROUP BY ingredient_id, entry_date
        ORDER BY entry_date DESC
-    `).all();
+    `).all(from);
+    const balanceByIngredientAndDate = {};
     const deltasByIngredient = {};
     allDeltas.forEach((r) => {
       if (!deltasByIngredient[r.ingredient_id]) deltasByIngredient[r.ingredient_id] = [];
       deltasByIngredient[r.ingredient_id].push({ date: r.entry_date, delta: Number(r.delta) || 0 });
     });
-    function closingBalance(ingredientId, currentStock, date) {
-      let balance = currentStock;
-      for (const d of (deltasByIngredient[ingredientId] || [])) {
-        if (d.date > date) balance -= d.delta;
+    Object.keys(deltasByIngredient).forEach((ingredientId) => {
+      const ingredient = ingredientById[ingredientId];
+      if (!ingredient) return;
+      let cumulativeAfter = 0; // sum of every day strictly after the one about to be recorded
+      const map = {};
+      for (const d of deltasByIngredient[ingredientId]) { // already newest-first
+        map[d.date] = Number(ingredient.stock) - cumulativeAfter;
+        cumulativeAfter += d.delta;
       }
-      return balance;
+      balanceByIngredientAndDate[ingredientId] = map;
+    });
+    function closingBalance(ingredientId, currentStock, date) {
+      const map = balanceByIngredientAndDate[ingredientId];
+      return map && date in map ? map[date] : currentStock;
     }
 
     const movement = db.prepare(`

@@ -144,45 +144,10 @@ export default function SummaryReportScreen({ onNavigate }) {
       <div className="px-6 pb-8 space-y-6">
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
           <div className="mb-4">
-            <h2 className="text-lg font-bold text-gray-900">Sales by Day</h2>
+            <h2 className="text-lg font-bold text-gray-900">Sales &amp; Stock Movement</h2>
             <p className="text-sm text-gray-500">{from} to {to}</p>
           </div>
-          <table className="w-full text-left border-collapse text-sm">
-            <thead>
-              <tr className="bg-gray-50 text-gray-500 uppercase text-[11px] font-bold border-b border-gray-200">
-                <th className="py-3 px-4">Date</th>
-                <th className="py-3 px-4 text-center">Total Orders</th>
-                <th className="py-3 px-4 text-right">Gross Sales</th>
-                <th className="py-3 px-4 text-right">Discounts</th>
-                <th className="py-3 px-4 text-right text-orange-600">Net Revenue</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <tr><td colSpan={5} className="py-8 text-center text-gray-400">Loading…</td></tr>
-              ) : salesByDay.length === 0 ? (
-                <tr><td colSpan={5} className="py-8 text-center text-gray-400">No orders found for this date range.</td></tr>
-              ) : (
-                salesByDay.map((d, i) => (
-                  <tr key={d.date} className={`border-b border-gray-100 ${i % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
-                    <td className="py-3 px-4 font-medium text-gray-900">{moment(d.date).format('MMM D, YYYY')}</td>
-                    <td className="py-3 px-4 text-center text-gray-600">{d.orders}</td>
-                    <td className="py-3 px-4 text-right text-gray-600">{formatMoney(d.revenue)}</td>
-                    <td className="py-3 px-4 text-right text-red-500">-{formatMoney(d.discounts)}</td>
-                    <td className="py-3 px-4 text-right font-bold text-gray-900">{formatMoney(d.net)}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <div className="mb-4">
-            <h2 className="text-lg font-bold text-gray-900">Stock Movement</h2>
-            <p className="text-sm text-gray-500">Milk and Dahi — sold, restocked, converted and wasted, {from} to {to}</p>
-          </div>
-          <StockMovementTable rows={stockMovement} loading={loading} />
+          <StockMovementTable salesByDay={salesByDay} stockMovement={stockMovement} formatMoney={formatMoney} loading={loading} />
         </div>
       </div>
     </div>

@@ -233,24 +233,39 @@ router.get('/stock-movement', requireUser, async (req, res) => {
     const ingredientById = {};
     ingredients.forEach((i) => { ingredientById[i.id] = i; });
 
+    // Nothing before `from` is fetched — see backend/routes/reports.js's own
+    // note on why, and on the O(rows × history) nested scan this replaced:
+    // that version blocked Node's one event loop for as long as it ran, on
+    // *every* branch's request, since the cloud is one shared process —
+    // which is what actually caused a batch of live browser requests
+    // (including totally unrelated ones like GET /settings) to time out.
     const allDeltas = await db.q(`
       SELECT ingredient_local_id AS ingredient_id, entry_date, SUM(amount)::float8 AS delta
         FROM inventory_entries
-       WHERE branch_id = ?
+       WHERE branch_id = ? AND entry_date >= ?
        GROUP BY ingredient_local_id, entry_date
        ORDER BY entry_date DESC
-    `, [branchId]);
+    `, [branchId, from]);
+    const balanceByIngredientAndDate = {};
     const deltasByIngredient = {};
     allDeltas.forEach((r) => {
       if (!deltasByIngredient[r.ingredient_id]) deltasByIngredient[r.ingredient_id] = [];
       deltasByIngredient[r.ingredient_id].push({ date: r.entry_date, delta: Number(r.delta) || 0 });
     });
-    function closingBalance(ingredientId, currentStock, date) {
-      let balance = currentStock;
-      for (const d of (deltasByIngredient[ingredientId] || [])) {
-        if (d.date > date) balance -= d.delta;
+    Object.keys(deltasByIngredient).forEach((ingredientId) => {
+      const ingredient = ingredientById[ingredientId];
+      if (!ingredient) return;
+      let cumulativeAfter = 0;
+      const map = {};
+      for (const d of deltasByIngredient[ingredientId]) {
+        map[d.date] = Number(ingredient.stock) - cumulativeAfter;
+        cumulativeAfter += d.delta;
       }
-      return balance;
+      balanceByIngredientAndDate[ingredientId] = map;
+    });
+    function closingBalance(ingredientId, currentStock, date) {
+      const map = balanceByIngredientAndDate[ingredientId];
+      return map && date in map ? map[date] : currentStock;
     }
 
     const movement = await db.q(`
