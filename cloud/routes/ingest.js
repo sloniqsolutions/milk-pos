@@ -239,6 +239,50 @@ async function dropDeletedCustomers(client, branchId) {
   `), [branchId]);
 }
 
+/**
+ * Ingredients get their own handler rather than simpleIngest, because
+ * `(branch_id, local_id)` alone isn't a safe key for this one table: a
+ * branch can have more than one till (this shop does), and each till's
+ * local_id is its own SQLite AUTOINCREMENT — unrelated to any other till's.
+ * Two tills that both have a "Yogurt" row, one as local_id 2 and the other
+ * as local_id 3, would otherwise land as two different cloud rows for what
+ * is physically one ingredient, or — worse — two *different* ingredients
+ * that happen to share a local_id would silently overwrite each other's
+ * stock under one row. (Every other table pushed here carries its own
+ * per-till identity in its data — an order's own line items, a shift's own
+ * cashier — so a same-numbered row from two tills is still two genuinely
+ * different rows, just both real. An ingredient has no such distinguishing
+ * data beyond its name, which is exactly what a shop already treats as the
+ * identity — SQLite's own `name TEXT NOT NULL UNIQUE` on the till agrees.)
+ *
+ * Before the upsert, every pushed row is remapped onto whichever local_id
+ * this branch already has on file for that name, if one exists — so a
+ * second till's own numbering just updates the first till's row instead of
+ * colliding with or duplicating it. See routes/cloud.js's
+ * restore-from-cloud for the same guard on the way back down, and where
+ * this exact problem first turned up.
+ */
+async function ingestIngredients(client, branchId, rows, receivedAt) {
+  const existing = await client.query(
+    'SELECT local_id, name FROM ingredients WHERE branch_id = $1', [branchId]);
+  const canonicalIdByName = new Map(existing.rows.map(r => [r.name, Number(r.local_id)]));
+
+  const remapped = new Map(); // canonical local_id -> row (last one in the batch wins)
+  for (const row of rows) {
+    const name = str(row.name);
+    const canonicalId = (name && canonicalIdByName.has(name)) ? canonicalIdByName.get(name) : num(row.id);
+    remapped.set(canonicalId, { ...row, id: canonicalId });
+  }
+
+  const { sql, params } = buildUpsert(
+    'ingredients', INGREDIENT_COLS, Array.from(remapped.values()),
+    r => [str(r.name), str(r.unit), num(r.stock), num(r.low_stock_threshold), num(r.cost_per_unit)],
+    receivedAt, branchId,
+    { alwaysCols: ['stock'], gateCondition: "ingredients.origin <> 'cloud'" });
+  await client.query(sql, params);
+  await dropDeletedIngredients(client, branchId);
+}
+
 const HANDLERS = {
   orders: ingestOrders,
 
@@ -274,9 +318,7 @@ const HANDLERS = {
   // real physical count, not something the dashboard can edit (see
   // routes/inventory.js). Name/unit/threshold/cost only update when the
   // dashboard hasn't claimed the row, same rule staff uses.
-  ingredients: simpleIngest('ingredients', INGREDIENT_COLS, r => [
-    str(r.name), str(r.unit), num(r.stock), num(r.low_stock_threshold), num(r.cost_per_unit),
-  ], { alwaysCols: ['stock'], gateCondition: "ingredients.origin <> 'cloud'" }, dropDeletedIngredients),
+  ingredients: ingestIngredients,
 
   // The credit customer book. Balance/litres/order figures are computed on
   // the till (backend/db/customer-summary.js) and always carried through —
