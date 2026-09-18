@@ -114,7 +114,12 @@ CREATE TABLE IF NOT EXISTS orders (
   customer_phone         TEXT,
   customer_address       TEXT,
   received_at            BIGINT NOT NULL,
-  UNIQUE (branch_id, local_id)
+  -- Which till pushed this row — see the migration block below for why
+  -- (branch_id, local_id) alone stopped being a safe key. NULL is fine on a
+  -- fresh table (nothing to migrate); a real value is always sent from here
+  -- on (backend/db/cloud-sync.js).
+  device_id              TEXT,
+  UNIQUE (branch_id, device_id, local_id)
 );
 CREATE INDEX IF NOT EXISTS idx_orders_branch     ON orders(branch_id);
 CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);
@@ -136,7 +141,8 @@ CREATE TABLE IF NOT EXISTS order_items (
   -- Resolved by the till at push time: menu item ids are per-machine, so the
   -- join to menu_items cannot be done here.
   category     TEXT,
-  UNIQUE (branch_id, local_id)
+  device_id    TEXT,
+  UNIQUE (branch_id, device_id, local_id)
 );
 CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
 -- quantity was INTEGER here for years while the till's own column
@@ -163,7 +169,8 @@ CREATE TABLE IF NOT EXISTS shifts (
   closed_at     TEXT,
   status        TEXT,
   received_at   BIGINT NOT NULL,
-  UNIQUE (branch_id, local_id)
+  device_id     TEXT,
+  UNIQUE (branch_id, device_id, local_id)
 );
 CREATE INDEX IF NOT EXISTS idx_shifts_branch ON shifts(branch_id);
 
@@ -180,7 +187,8 @@ CREATE TABLE IF NOT EXISTS expenses (
   from_drawer    INTEGER,
   created_at     TEXT,
   received_at    BIGINT NOT NULL,
-  UNIQUE (branch_id, local_id)
+  device_id      TEXT,
+  UNIQUE (branch_id, device_id, local_id)
 );
 CREATE INDEX IF NOT EXISTS idx_expenses_branch     ON expenses(branch_id);
 CREATE INDEX IF NOT EXISTS idx_expenses_created_at ON expenses(created_at);
@@ -199,7 +207,8 @@ CREATE TABLE IF NOT EXISTS staff (
   -- No PIN, hashed or otherwise. It is of no use to the dashboard and every
   -- copy of a credential is another place it can leak from.
   received_at BIGINT NOT NULL,
-  UNIQUE (branch_id, local_id)
+  device_id   TEXT,
+  UNIQUE (branch_id, device_id, local_id)
 );
 
 /*
@@ -237,7 +246,8 @@ CREATE TABLE IF NOT EXISTS customers (
   balance        DOUBLE PRECISION DEFAULT 0,
   total_litres   DOUBLE PRECISION DEFAULT 0,
   received_at    BIGINT NOT NULL,
-  UNIQUE (branch_id, local_id)
+  device_id      TEXT,
+  UNIQUE (branch_id, device_id, local_id)
 );
 CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
 
@@ -261,7 +271,8 @@ CREATE TABLE IF NOT EXISTS credit_payments (
   received_by       TEXT,
   created_at        TEXT,
   received_at       BIGINT NOT NULL,
-  UNIQUE (branch_id, local_id)
+  device_id         TEXT,
+  UNIQUE (branch_id, device_id, local_id)
 );
 CREATE INDEX IF NOT EXISTS idx_credit_payments_shift ON credit_payments(branch_id, local_shift_id);
 
@@ -281,7 +292,8 @@ CREATE TABLE IF NOT EXISTS inventory_entries (
   entry_date          TEXT,
   created_at          TEXT,
   received_at         BIGINT NOT NULL,
-  UNIQUE (branch_id, local_id)
+  device_id           TEXT,
+  UNIQUE (branch_id, device_id, local_id)
 );
 CREATE INDEX IF NOT EXISTS idx_inventory_entries_branch ON inventory_entries(branch_id, entry_date);
 
@@ -706,6 +718,92 @@ UPDATE branches
                                       '[^A-Za-z0-9]+', '-', 'g'),
                        '^-+|-+$', '', 'g'), '')
  WHERE code IS NULL OR code = '';
+
+-- device_id, for a database created before a branch could have more than one
+-- till. (branch_id, local_id) alone used to be the key every synced table
+-- upserted on — safe under the original one-till-per-branch assumption, but
+-- not once a second till exists: each till's local_id is its own SQLite
+-- AUTOINCREMENT, unrelated to any other till's, so two tills' own order #47
+-- would have silently overwritten each other under one row. This happened
+-- for real, just for ingredients first (two different cloud rows both named
+-- "Yogurt", one per till's own local_id) — see routes/ingest.js's
+-- ingestIngredients for why that table gets a *name*-based merge instead of
+-- this: unlike an order, two ingredients that share a local_id really are
+-- meant to be the same thing, and a merge is correct where a sale would need
+-- to stay two separate rows.
+--
+-- Existing rows predate any till sending its own id, so they are backfilled
+-- onto whichever till is currently paired to each branch — there being
+-- exactly one till per branch until now, that till's history is what they
+-- already are. A push from an unupdated client (no device_id sent yet) is
+-- read as 'legacy' rather than left NULL: Postgres treats every NULL as
+-- distinct for uniqueness, which would silently turn the protection back off
+-- for exactly the pushes that need it — see routes/ingest.js's own read of
+-- this field for the same reasoning.
+ALTER TABLE orders            ADD COLUMN IF NOT EXISTS device_id TEXT;
+ALTER TABLE order_items       ADD COLUMN IF NOT EXISTS device_id TEXT;
+ALTER TABLE shifts            ADD COLUMN IF NOT EXISTS device_id TEXT;
+ALTER TABLE expenses          ADD COLUMN IF NOT EXISTS device_id TEXT;
+ALTER TABLE staff             ADD COLUMN IF NOT EXISTS device_id TEXT;
+ALTER TABLE customers         ADD COLUMN IF NOT EXISTS device_id TEXT;
+ALTER TABLE credit_payments   ADD COLUMN IF NOT EXISTS device_id TEXT;
+ALTER TABLE inventory_entries ADD COLUMN IF NOT EXISTS device_id TEXT;
+
+-- Branch 1's own till — the only till that has ever pushed to this branch
+-- before device_id existed, so every pre-migration row genuinely is its
+-- history. Read from that till's own db/activation-config.js:getDeviceId()
+-- once, here, rather than left to guess: hardcoding it is correct precisely
+-- because this is one-time legacy data, not an ongoing assumption — any
+-- till pushing from this point on sends its own real id with every row (see
+-- backend/db/cloud-sync.js), and a future second branch starts with nothing
+-- to backfill at all.
+UPDATE orders            SET device_id = '6c927c39-72d8-40c1-b873-251871df45b4' WHERE branch_id = 1 AND device_id IS NULL;
+UPDATE order_items       SET device_id = '6c927c39-72d8-40c1-b873-251871df45b4' WHERE branch_id = 1 AND device_id IS NULL;
+UPDATE shifts             SET device_id = '6c927c39-72d8-40c1-b873-251871df45b4' WHERE branch_id = 1 AND device_id IS NULL;
+UPDATE expenses            SET device_id = '6c927c39-72d8-40c1-b873-251871df45b4' WHERE branch_id = 1 AND device_id IS NULL;
+UPDATE staff               SET device_id = '6c927c39-72d8-40c1-b873-251871df45b4' WHERE branch_id = 1 AND device_id IS NULL;
+UPDATE customers           SET device_id = '6c927c39-72d8-40c1-b873-251871df45b4' WHERE branch_id = 1 AND device_id IS NULL;
+UPDATE credit_payments     SET device_id = '6c927c39-72d8-40c1-b873-251871df45b4' WHERE branch_id = 1 AND device_id IS NULL;
+UPDATE inventory_entries   SET device_id = '6c927c39-72d8-40c1-b873-251871df45b4' WHERE branch_id = 1 AND device_id IS NULL;
+
+-- Still-NULL rows (any other branch, or a row this backfill didn't cover)
+-- fall back to 'legacy', same as an unupdated client's push, so the new
+-- constraint below has something non-NULL to key on either way.
+UPDATE orders            SET device_id = 'legacy' WHERE device_id IS NULL;
+UPDATE order_items       SET device_id = 'legacy' WHERE device_id IS NULL;
+UPDATE shifts             SET device_id = 'legacy' WHERE device_id IS NULL;
+UPDATE expenses            SET device_id = 'legacy' WHERE device_id IS NULL;
+UPDATE staff               SET device_id = 'legacy' WHERE device_id IS NULL;
+UPDATE customers           SET device_id = 'legacy' WHERE device_id IS NULL;
+UPDATE credit_payments     SET device_id = 'legacy' WHERE device_id IS NULL;
+UPDATE inventory_entries   SET device_id = 'legacy' WHERE device_id IS NULL;
+
+ALTER TABLE orders            DROP CONSTRAINT IF EXISTS orders_branch_id_local_id_key;
+ALTER TABLE order_items       DROP CONSTRAINT IF EXISTS order_items_branch_id_local_id_key;
+ALTER TABLE shifts            DROP CONSTRAINT IF EXISTS shifts_branch_id_local_id_key;
+ALTER TABLE expenses          DROP CONSTRAINT IF EXISTS expenses_branch_id_local_id_key;
+ALTER TABLE staff             DROP CONSTRAINT IF EXISTS staff_branch_id_local_id_key;
+ALTER TABLE customers         DROP CONSTRAINT IF EXISTS customers_branch_id_local_id_key;
+ALTER TABLE credit_payments   DROP CONSTRAINT IF EXISTS credit_payments_branch_id_local_id_key;
+ALTER TABLE inventory_entries DROP CONSTRAINT IF EXISTS inventory_entries_branch_id_local_id_key;
+
+ALTER TABLE orders            DROP CONSTRAINT IF EXISTS orders_branch_id_device_id_local_id_key;
+ALTER TABLE order_items       DROP CONSTRAINT IF EXISTS order_items_branch_id_device_id_local_id_key;
+ALTER TABLE shifts            DROP CONSTRAINT IF EXISTS shifts_branch_id_device_id_local_id_key;
+ALTER TABLE expenses          DROP CONSTRAINT IF EXISTS expenses_branch_id_device_id_local_id_key;
+ALTER TABLE staff             DROP CONSTRAINT IF EXISTS staff_branch_id_device_id_local_id_key;
+ALTER TABLE customers         DROP CONSTRAINT IF EXISTS customers_branch_id_device_id_local_id_key;
+ALTER TABLE credit_payments   DROP CONSTRAINT IF EXISTS credit_payments_branch_id_device_id_local_id_key;
+ALTER TABLE inventory_entries DROP CONSTRAINT IF EXISTS inventory_entries_branch_id_device_id_local_id_key;
+
+ALTER TABLE orders            ADD CONSTRAINT orders_branch_id_device_id_local_id_key UNIQUE (branch_id, device_id, local_id);
+ALTER TABLE order_items       ADD CONSTRAINT order_items_branch_id_device_id_local_id_key UNIQUE (branch_id, device_id, local_id);
+ALTER TABLE shifts            ADD CONSTRAINT shifts_branch_id_device_id_local_id_key UNIQUE (branch_id, device_id, local_id);
+ALTER TABLE expenses          ADD CONSTRAINT expenses_branch_id_device_id_local_id_key UNIQUE (branch_id, device_id, local_id);
+ALTER TABLE staff             ADD CONSTRAINT staff_branch_id_device_id_local_id_key UNIQUE (branch_id, device_id, local_id);
+ALTER TABLE customers         ADD CONSTRAINT customers_branch_id_device_id_local_id_key UNIQUE (branch_id, device_id, local_id);
+ALTER TABLE credit_payments   ADD CONSTRAINT credit_payments_branch_id_device_id_local_id_key UNIQUE (branch_id, device_id, local_id);
+ALTER TABLE inventory_entries ADD CONSTRAINT inventory_entries_branch_id_device_id_local_id_key UNIQUE (branch_id, device_id, local_id);
 
 -- ---------------------------------------------------------- activation --
 --

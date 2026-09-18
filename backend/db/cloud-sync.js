@@ -20,6 +20,7 @@ const { postJson, deleteJson } = require('./cloud-http');
 const db = require('./database');
 const { getCustomerSummary } = require('./customer-summary');
 const { buildOrderSyncPayload } = require('./order-sync-payload');
+const { getDeviceId } = require('./activation-config');
 
 /**
  * Cloud ingest table per local table. Not every local table has a cloud
@@ -53,6 +54,12 @@ function pushBatches(config, cloudTable, rows, label) {
     postJson(config.cloudUrl, '/api/ingest/batch', config.apiKey, {
       table: cloudTable,
       rows: chunk,
+      // Which till this is — see cloud/db/schema.js's migration note and
+      // cloud/routes/ingest.js's buildUpsert for why (branch_id, local_id)
+      // alone stopped being a safe key once a branch can have more than one
+      // till. Reuses the same stable per-install id activation already
+      // relies on (db/activation-config.js) rather than minting a second one.
+      device_id: getDeviceId(),
     }).catch((err) => {
       console.error(`[Cloud] sync ${label} failed:`, err.message);
     });

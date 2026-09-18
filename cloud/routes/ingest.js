@@ -59,16 +59,27 @@ const str = (v) => (v == null ? null : String(v));
  *   `alwaysCols` lists which columns that applies to; every other column in
  *   `columns` is gated by `gateCondition` instead of the whole row.
  */
-function buildUpsert(table, columns, rows, valuesFor, receivedAt, branchId, opts) {
+/**
+ * @param {string} deviceId Which till pushed this batch — see the migration
+ *   block in db/schema.js for why (branch_id, local_id) alone stopped being
+ *   a safe conflict key once a branch can have more than one till. Every
+ *   table here carries it except ingredients, which passes `withDevice:
+ *   false` — see routes/ingest.js's ingestIngredients for why that one
+ *   table needs the opposite treatment (merged by name, not disambiguated
+ *   by device).
+ */
+function buildUpsert(table, columns, rows, valuesFor, receivedAt, branchId, deviceId, opts) {
   const options = typeof opts === 'string' ? { conflictWhere: opts } : (opts || {});
-  const { conflictWhere, alwaysCols = [], gateCondition } = options;
+  const { conflictWhere, alwaysCols = [], gateCondition, withDevice = true } = options;
 
-  const cols = ['branch_id', 'local_id', ...columns, 'received_at'];
+  const keyCols = withDevice ? ['branch_id', 'device_id', 'local_id'] : ['branch_id', 'local_id'];
+  const cols = [...keyCols, ...columns, 'received_at'];
   const params = [];
   const tuples = [];
 
   rows.forEach((row) => {
-    const values = [branchId, num(row.id), ...valuesFor(row), receivedAt];
+    const keyValues = withDevice ? [branchId, deviceId, num(row.id)] : [branchId, num(row.id)];
+    const values = [...keyValues, ...valuesFor(row), receivedAt];
     const placeholders = values.map((v) => {
       params.push(v);
       return `$${params.length}`;
@@ -88,11 +99,13 @@ function buildUpsert(table, columns, rows, valuesFor, receivedAt, branchId, opts
     'received_at = EXCLUDED.received_at',
   ].join(', ');
 
+  const conflictTarget = withDevice ? '(branch_id, device_id, local_id)' : '(branch_id, local_id)';
+
   return {
     sql: `
       INSERT INTO ${table} (${cols.join(', ')})
       VALUES ${tuples.join(', ')}
-      ON CONFLICT (branch_id, local_id) DO UPDATE SET ${updates}
+      ON CONFLICT ${conflictTarget} DO UPDATE SET ${updates}
       ${conflictWhere ? `WHERE ${conflictWhere}` : ''}
       RETURNING id, local_id
     `,
@@ -146,16 +159,20 @@ const ORDER_VALUES = (r) => [
   str(r.customer_name), str(r.customer_phone), str(r.customer_address),
 ];
 
-async function ingestOrders(client, branchId, rows, receivedAt) {
-  const orderUpsert = buildUpsert('orders', ORDER_COLS, rows, ORDER_VALUES, receivedAt, branchId);
+async function ingestOrders(client, branchId, rows, receivedAt, deviceId) {
+  const orderUpsert = buildUpsert('orders', ORDER_COLS, rows, ORDER_VALUES, receivedAt, branchId, deviceId);
   const result = await client.query(orderUpsert.sql, orderUpsert.params);
 
   /*
    * Remap the line items onto the CLOUD's order id.
    *
-   * The till sends its own order id, which is only unique within that branch.
-   * Storing it unchanged would make E-18's items join onto CBR Town's order of
-   * the same number — quietly attributing one shop's food to the other's sale.
+   * The till sends its own order id, which is only unique within that branch
+   * *and that till* (see the device_id note on buildUpsert above) — a batch
+   * only ever comes from one till at a time, so local_id alone is still
+   * enough to map these RETURNING rows back onto the rows just pushed.
+   * Storing the till's own id unchanged would make E-18's items join onto
+   * CBR Town's order of the same number — quietly attributing one shop's
+   * food to the other's sale.
    */
   const cloudIdFor = new Map(result.rows.map(r => [Number(r.local_id), r.id]));
 
@@ -171,7 +188,7 @@ async function ingestOrders(client, branchId, rows, receivedAt) {
   const params = [];
   const tuples = items.map(({ item, orderId }) => {
     const values = [
-      branchId, num(item.id), orderId, num(item.menu_item_id), str(item.name),
+      branchId, deviceId, num(item.id), orderId, num(item.menu_item_id), str(item.name),
       num(item.price), num(item.quantity), num(item.is_deal), num(item.variant_id),
       // Resolved by the till, because menu item ids are per-machine and cannot
       // be resolved here.
@@ -182,10 +199,10 @@ async function ingestOrders(client, branchId, rows, receivedAt) {
 
   await client.query(`
     INSERT INTO order_items (
-      branch_id, local_id, order_id, menu_item_id, name, price, quantity,
+      branch_id, device_id, local_id, order_id, menu_item_id, name, price, quantity,
       is_deal, variant_id, category
     ) VALUES ${tuples.join(', ')}
-    ON CONFLICT (branch_id, local_id) DO UPDATE SET
+    ON CONFLICT (branch_id, device_id, local_id) DO UPDATE SET
       order_id = EXCLUDED.order_id, name = EXCLUDED.name, price = EXCLUDED.price,
       quantity = EXCLUDED.quantity, is_deal = EXCLUDED.is_deal,
       variant_id = EXCLUDED.variant_id, category = EXCLUDED.category
@@ -194,9 +211,9 @@ async function ingestOrders(client, branchId, rows, receivedAt) {
 
 /** The simple tables: one multi-row upsert, no children to remap. */
 function simpleIngest(table, columns, valuesFor, opts, after) {
-  return async (client, branchId, rows, receivedAt) => {
+  return async (client, branchId, rows, receivedAt, deviceId) => {
     const { sql, params } = buildUpsert(
-      table, columns, rows, valuesFor, receivedAt, branchId, opts);
+      table, columns, rows, valuesFor, receivedAt, branchId, deviceId, opts);
     await client.query(sql, params);
     if (after) await after(client, branchId);
   };
@@ -262,7 +279,7 @@ async function dropDeletedCustomers(client, branchId) {
  * restore-from-cloud for the same guard on the way back down, and where
  * this exact problem first turned up.
  */
-async function ingestIngredients(client, branchId, rows, receivedAt) {
+async function ingestIngredients(client, branchId, rows, receivedAt /* , deviceId — unused: merged by name instead, see above */) {
   const existing = await client.query(
     'SELECT local_id, name FROM ingredients WHERE branch_id = $1', [branchId]);
   const canonicalIdByName = new Map(existing.rows.map(r => [r.name, Number(r.local_id)]));
@@ -277,8 +294,8 @@ async function ingestIngredients(client, branchId, rows, receivedAt) {
   const { sql, params } = buildUpsert(
     'ingredients', INGREDIENT_COLS, Array.from(remapped.values()),
     r => [str(r.name), str(r.unit), num(r.stock), num(r.low_stock_threshold), num(r.cost_per_unit)],
-    receivedAt, branchId,
-    { alwaysCols: ['stock'], gateCondition: "ingredients.origin <> 'cloud'" });
+    receivedAt, branchId, null,
+    { alwaysCols: ['stock'], gateCondition: "ingredients.origin <> 'cloud'", withDevice: false });
   await client.query(sql, params);
   await dropDeletedIngredients(client, branchId);
 }
@@ -362,6 +379,10 @@ const HANDLERS = {
  */
 router.post('/batch', requireBranch, async (req, res) => {
   const { table, rows } = req.body || {};
+  // A push from a till that hasn't picked up the code sending this yet is
+  // read as 'legacy' rather than left blank — see db/schema.js's migration
+  // note on why every row needs a real, non-NULL value here.
+  const deviceId = str(req.body && req.body.device_id) || 'legacy';
   const handler = HANDLERS[table];
 
   if (!handler) {
@@ -381,7 +402,7 @@ router.post('/batch', requireBranch, async (req, res) => {
     const receivedAt = Date.now();
 
     await db.tx(async (client) => {
-      await handler(client, req.branch.id, rows, receivedAt);
+      await handler(client, req.branch.id, rows, receivedAt, deviceId);
       await client.query(`
         INSERT INTO sync_cursor (branch_id, table_name, rows_received, last_synced_ms)
         VALUES ($1, $2, $3, $4)
