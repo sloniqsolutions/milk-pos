@@ -214,7 +214,22 @@ export default function Settings() {
       const result = await cloudAPI.pair({ cloud_url: cloudUrl.trim(), api_key: apiKey.trim() });
       setApiKey('');
       loadCloudStatus();
-      setToast({ message: `Connected as ${result.branch_name}. Sales will start syncing.`, type: 'success' });
+      // Set when this till had never processed a sale and the cloud already
+      // had real history for the branch — see backend/routes/cloud.js's
+      // /pair, which pulled that history down automatically rather than
+      // starting this till's own numbering from zero beside it.
+      if (result.auto_restored) {
+        const r = result.auto_restored;
+        const pinNote = (result.needs_pin_reset && result.needs_pin_reset.length)
+          ? ` PIN reset needed for: ${result.needs_pin_reset.join(', ')} — set a new one from the Staff screen.`
+          : '';
+        setToast({
+          message: `Connected as ${result.branch_name}. Pulled in ${r.orders} orders, ${r.customers} customers and ${r.staff} staff already on the cloud.${pinNote}`,
+          type: 'success',
+        });
+      } else {
+        setToast({ message: `Connected as ${result.branch_name}. Sales will start syncing.`, type: 'success' });
+      }
     } catch (err) {
       setToast({ message: err.message || 'Could not connect to the cloud', type: 'error' });
     } finally {

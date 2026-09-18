@@ -286,7 +286,14 @@ export const activationAPI = {
 export const cloudAPI = {
   status: () => request<{ paired: boolean; cloud_url?: string; branch_id?: number; branch_name?: string }>('GET', '/cloud/status'),
   pair: (body: { cloud_url: string; api_key: string }) =>
-    request<{ success: boolean; branch_name: string }>('POST', '/cloud/pair', body),
+    request<{
+      success: boolean; branch_name: string;
+      // Set when this till had no orders of its own and the cloud already
+      // had real history for the branch — see backend/routes/cloud.js's
+      // /pair, which pulls that history down automatically in that case.
+      auto_restored?: { staff: number; customers: number; orders: number; shifts: number; expenses: number; ingredients: number } | null;
+      needs_pin_reset?: string[];
+    }>('POST', '/cloud/pair', body),
   unpair: () => request<{ success: boolean }>('POST', '/cloud/unpair'),
   restoreFromCloud: (body: { pin: string }) =>
     request<{

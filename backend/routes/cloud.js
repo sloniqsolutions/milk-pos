@@ -110,12 +110,55 @@ router.post('/pair', requireAdmin, async (req, res) => {
     };
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
 
-    // Everything that already existed before this till was ever connected —
-    // see db/cloud-sync.js's pushInitialBackfill for why this can't just
-    // wait for the next edit to each row.
+    /*
+     * A second (or replacement) till pairing to a branch that already has
+     * real history used to start its own order/shift/ingredient numbering
+     * from zero right beside the first till's — which is exactly how two
+     * different cloud rows for "Yogurt" ended up sharing a branch, one per
+     * till's own local_id. See cloud/routes/ingest.js's own note on the
+     * same problem from the other direction.
+     *
+     * If this till has never processed a single order, there is nothing of
+     * its own to protect, so it pulls the branch's real history down first
+     * — the same, already-proven logic as the PIN-gated manual restore
+     * below, just without the PIN: that gate exists to stop this from
+     * happening to a till with real data on it, and an order count of zero
+     * is what proves this isn't one. A till that already has orders never
+     * takes this path; it pairs exactly as it always did.
+     */
+    let autoRestored = null;
+    let needsPinReset = [];
+    const ordersSoFar = db.prepare('SELECT COUNT(*) AS n FROM orders').get().n;
+    if (ordersSoFar === 0) {
+      try {
+        const cloudData = await getJson(cloudUrl, '/api/restore/full', apiKey);
+        const hasRealHistory = ['staff', 'customers', 'ingredients', 'shifts', 'expenses', 'orders']
+          .some((key) => Array.isArray(cloudData[key]) && cloudData[key].length > 0);
+        if (hasRealHistory) {
+          const restoreResult = await applyCloudRestore(cloudData);
+          autoRestored = restoreResult.restored;
+          needsPinReset = restoreResult.needs_pin_reset;
+        }
+      } catch (err) {
+        // Pairing itself already succeeded and is worth keeping even if this
+        // part fails — pushInitialBackfill below still runs either way, and
+        // the owner can always run the manual restore afterward.
+        console.error('[Cloud] Auto-restore on pairing failed:', err.message);
+      }
+    }
+
+    // Everything this till now has — its own original data, or what the
+    // pull above just gave it — pushed up so the cloud has it too. See
+    // db/cloud-sync.js's pushInitialBackfill for why this can't just wait
+    // for the next edit to each row.
     pushInitialBackfill();
 
-    res.json({ success: true, branch_name: result.branch_name });
+    res.json({
+      success: true,
+      branch_name: result.branch_name,
+      auto_restored: autoRestored,
+      needs_pin_reset: needsPinReset,
+    });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -151,26 +194,15 @@ router.post('/unpair', requireAdmin, (req, res) => {
  * on this machine, and a session cookie proves someone is signed in, not
  * that they meant to press the one button here that cannot be undone.
  */
-router.post('/restore-from-cloud', requireAdmin, async (req, res) => {
-  const pin = req.body && req.body.pin;
-  if (!pin) return res.status(400).json({ error: 'Enter your PIN to confirm.' });
-
-  const admin = db.prepare('SELECT id, pin FROM staff WHERE id = ?').get(req.user.staffId);
-  const pinOk = admin && await bcrypt.compare(String(pin), admin.pin);
-  if (!pinOk) return res.status(401).json({ error: 'Incorrect PIN.' });
-
-  const config = readCloudConfig();
-  if (!config) return res.status(400).json({ error: 'Connect to the cloud first, from the field above.' });
-
-  let data;
-  try {
-    data = await getJson(config.cloudUrl, '/api/restore/full', config.apiKey);
-  } catch (err) {
-    return res.status(400).json({ error: err.message });
-  }
-
-  try {
-    // A phone number is the only thread back to a credit customer's row: the
+/**
+ * Applies a full cloud export onto this till's local database — the guts of
+ * POST /restore-from-cloud below, pulled out so POST /pair can run the exact
+ * same, already-proven logic automatically for a fresh till joining a shop
+ * that already has real cloud history (see /pair's own comment on when and
+ * why). Throws on failure; callers decide how to report that.
+ */
+async function applyCloudRestore(data) {
+  // A phone number is the only thread back to a credit customer's row: the
     // cloud never received the till's numeric customer_id, only the name,
     // phone and address printed on the order (see routes/restore.js's own
     // note on this). Matching on phone recovers the link for the common
@@ -327,8 +359,7 @@ router.post('/restore-from-cloud', requireAdmin, async (req, res) => {
 
     run();
 
-    res.json({
-      success: true,
+    return {
       restored: {
         staff: (data.staff || []).length,
         customers: (data.customers || []).length,
@@ -338,7 +369,30 @@ router.post('/restore-from-cloud', requireAdmin, async (req, res) => {
         ingredients: (data.ingredients || []).length,
       },
       needs_pin_reset: placeholderPins,
-    });
+    };
+}
+
+router.post('/restore-from-cloud', requireAdmin, async (req, res) => {
+  const pin = req.body && req.body.pin;
+  if (!pin) return res.status(400).json({ error: 'Enter your PIN to confirm.' });
+
+  const admin = db.prepare('SELECT id, pin FROM staff WHERE id = ?').get(req.user.staffId);
+  const pinOk = admin && await bcrypt.compare(String(pin), admin.pin);
+  if (!pinOk) return res.status(401).json({ error: 'Incorrect PIN.' });
+
+  const config = readCloudConfig();
+  if (!config) return res.status(400).json({ error: 'Connect to the cloud first, from the field above.' });
+
+  let data;
+  try {
+    data = await getJson(config.cloudUrl, '/api/restore/full', config.apiKey);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  try {
+    const result = await applyCloudRestore(data);
+    res.json({ success: true, ...result });
   } catch (err) {
     console.error('Restore from cloud failed:', err.message);
     res.status(500).json({ error: 'Could not restore from the cloud.' });
