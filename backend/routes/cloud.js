@@ -248,15 +248,34 @@ router.post('/restore-from-cloud', requireAdmin, async (req, res) => {
       // with them — which is exactly the bug this replaced: a plain INSERT
       // failed with "UNIQUE constraint failed: ingredients.id" every time,
       // because id 1 and 3 were never actually free to begin with.
-      const upsertIngredient = db.prepare(`
+      const upsertIngredientById = db.prepare(`
         INSERT INTO ingredients (id, name, unit, stock, low_stock_threshold, cost_per_unit)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name, unit = excluded.unit, stock = excluded.stock,
           low_stock_threshold = excluded.low_stock_threshold, cost_per_unit = excluded.cost_per_unit
       `);
+      // ingredients.name is UNIQUE locally, but the cloud has no such
+      // constraint — a stale duplicate can end up there under a different
+      // local_id (this happened once for real: two cloud rows both named
+      // "Yogurt", the older one orphaned after being deleted at the till with
+      // no delete-sync to remove it on the cloud's side too). Restoring that
+      // second row by id alone would try to INSERT a second "Yogurt" and
+      // crash the whole restore on the UNIQUE constraint. Checking by name
+      // first means a second cloud row sharing a name updates the row that's
+      // already here instead — whichever one the cloud lists last simply
+      // wins, and every other ingredient restores exactly as before.
+      const findIngredientByName = db.prepare('SELECT id FROM ingredients WHERE name = ?');
+      const updateIngredientByName = db.prepare(`
+        UPDATE ingredients SET unit = ?, stock = ?, low_stock_threshold = ?, cost_per_unit = ? WHERE name = ?
+      `);
       for (const i of data.ingredients || []) {
-        upsertIngredient.run(i.local_id, i.name, i.unit, i.stock, i.low_stock_threshold, i.cost_per_unit);
+        const existingByName = findIngredientByName.get(i.name);
+        if (existingByName && existingByName.id !== i.local_id) {
+          updateIngredientByName.run(i.unit, i.stock, i.low_stock_threshold, i.cost_per_unit, i.name);
+        } else {
+          upsertIngredientById.run(i.local_id, i.name, i.unit, i.stock, i.low_stock_threshold, i.cost_per_unit);
+        }
       }
 
       const insertShift = db.prepare(`
