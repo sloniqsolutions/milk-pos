@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { useState, useEffect, useMemo } from 'react';
-import { DollarSign, ShoppingBag, TrendingUp, Tag, Wallet, Printer, Download, FileSpreadsheet, CreditCard } from 'lucide-react';
+import { DollarSign, ShoppingBag, TrendingUp, Tag, Wallet, Printer, Download, FileSpreadsheet, CreditCard, Droplet, Package } from 'lucide-react';
 import { reportsAPI } from '@/api/index';
 import { buildCsv, money } from '@/lib/csv';
 import { useSettings } from '@/lib/SettingsContext';
@@ -21,6 +21,12 @@ import {
 // who actually needs every row already has Export for that.
 const TABLE_ROW_CAP = 500;
 
+/** "45", "45.5" — never "45.500000000001", never a trailing ".0". */
+const fmtQty = (n) => {
+  const rounded = Math.round((Number(n) || 0) * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+};
+
 const FILTER_CHIPS = [
   { label: 'Today', value: 'today' },
   { label: 'Yesterday', value: 'yesterday' },
@@ -38,7 +44,7 @@ export default function Reports() {
   
   const [dateRange, setDateRange] = useState('today');
   const [net, setNet] = useState({ revenue: 0, expenses: 0, net: 0 });
-  const [kpi, setKpi] = useState({ revenue: 0, orders: 0, avg_order_value: 0, total_discounts: 0, credit_collected: 0 });
+  const [kpi, setKpi] = useState({ revenue: 0, orders: 0, avg_order_value: 0, total_discounts: 0, credit_collected: 0, ingredient_usage: [] });
   const [revenueData, setRevenueData] = useState([]);
   const [topItems, setTopItems] = useState([]);
   const [categories, setCategories] = useState([]);
@@ -103,7 +109,8 @@ export default function Reports() {
         orders: kData.total_orders || 0,
         avg_order_value: kData.avg_order_value || 0,
         total_discounts: kData.total_discounts || 0,
-        credit_collected: kData.credit_collected || 0
+        credit_collected: kData.credit_collected || 0,
+        ingredient_usage: Array.isArray(kData.ingredient_usage) ? kData.ingredient_usage : []
       });
       setNet(nData);
       
@@ -510,6 +517,29 @@ export default function Reports() {
             subtitle={net.net < 0 ? 'Expenses exceeded revenue' : 'After expenses'}
           />
         </div>
+
+        {/*
+          Section 1b - Ingredient usage. One card per ingredient rather than
+          hardcoding Milk/Dahi by name, so a third ingredient just shows up
+          here on its own. `used` is this date range only; the remaining
+          figure underneath is always live stock right now, regardless of
+          which range is picked — see backend/routes/reports.js's own note on
+          why it reads off inventory_entries instead of recipes.
+        */}
+        {kpi.ingredient_usage.length > 0 && (
+          <div className="grid grid-cols-4 gap-4 print:hidden">
+            {kpi.ingredient_usage.map((ing, i) => (
+              <KpiCard
+                key={ing.id}
+                title={`${ing.name} Used`}
+                value={`${fmtQty(ing.used)} ${ing.unit}`}
+                icon={i % 2 === 0 ? Droplet : Package}
+                color="#0EA5E9"
+                subtitle={`${fmtQty(ing.current_stock)} ${ing.unit} remaining in stock`}
+              />
+            ))}
+          </div>
+        )}
 
         {/* Section 2 - Revenue Over Time */}
         <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm print:hidden">

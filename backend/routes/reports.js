@@ -77,6 +77,22 @@ router.get('/kpi', (req, res) => {
       AND status != 'voided'${scope.sql}
     `).get(prevFrom.toISOString().split('T')[0], prevTo.toISOString().split('T')[0], ...scope.params);
 
+    // How much of each ingredient this date range actually consumed, and
+    // what's left right now. `used` reads off inventory_entries' own 'sale'
+    // rows (see routes/orders.js) rather than re-deriving it from recipes —
+    // same figure, but one that a manager can see without a per-cashier
+    // ingredient scope existing to filter it (there isn't one; stock isn't a
+    // per-cashier concept the way revenue is).
+    const ingredientUsage = db.prepare(`
+      SELECT i.id, i.name, i.unit, i.stock AS current_stock,
+             COALESCE(-SUM(CASE WHEN ie.type = 'sale' THEN ie.amount ELSE 0 END), 0) AS used
+        FROM ingredients i
+        LEFT JOIN inventory_entries ie
+          ON ie.ingredient_id = i.id AND DATE(ie.entry_date) BETWEEN DATE(?) AND DATE(?)
+       GROUP BY i.id, i.name, i.unit, i.stock
+       ORDER BY i.name
+    `).all(from, to);
+
     const revenueTrend = prev.total_revenue > 0
       ? (((summary.total_revenue - prev.total_revenue) / prev.total_revenue) * 100).toFixed(1)
       : 0;
@@ -89,6 +105,7 @@ router.get('/kpi', (req, res) => {
       revenue_trend: revenueTrend,
       orders_trend: ordersTrend,
       credit_collected: creditCollected.credit_collected,
+      ingredient_usage: ingredientUsage,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

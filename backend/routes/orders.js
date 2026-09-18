@@ -4,6 +4,9 @@ const db = require('../db/database');
 const { syncUpsert, syncUpsertMany } = require('../db/cloud-sync');
 const { getCustomerSummary } = require('../db/customer-summary');
 const { buildOrderSyncPayload } = require('../db/order-sync-payload');
+const { recordEntry } = require('../db/inventory-entries');
+
+const today = () => new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD, local time
 
 // Create a new completed order
 router.post('/', (req, res) => {
@@ -175,6 +178,13 @@ router.post('/', (req, res) => {
         ingredients.forEach(ing => {
           const totalQty = ing.quantity_required * item.quantity;
           deductStock.run(totalQty, ing.ingredient_id);
+          // Logged the same way a restock/conversion/waste is (type 'sale',
+          // negative) so Reports' ingredient-used figure can be read straight
+          // off inventory_entries instead of re-deriving it from recipes —
+          // the cloud has no recipes table at all to do that join itself, see
+          // routes/reports.js's own note on why this is what makes that
+          // figure possible there too.
+          recordEntry(ing.ingredient_id, 'sale', -totalQty, today());
         });
       }
     });
@@ -335,7 +345,12 @@ const voidOrder = (req, res) => {
         const recipeRow = getRecipe.get(item.menu_item_id, item.variant_id || null);
         if (!recipeRow) return;
         getRecipeIngredients.all(recipeRow.id).forEach(ing => {
-          restoreStock.run(ing.quantity_required * item.quantity, ing.ingredient_id);
+          const totalQty = ing.quantity_required * item.quantity;
+          restoreStock.run(totalQty, ing.ingredient_id);
+          // Same 'sale' type as the original deduction, positive this time —
+          // summing that type over a date range nets a void out against the
+          // sale it reversed, same as it never happened.
+          recordEntry(ing.ingredient_id, 'sale', totalQty, today());
           touchedIngredientIds.add(ing.ingredient_id);
         });
       });

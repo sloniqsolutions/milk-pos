@@ -172,6 +172,26 @@ router.get('/kpi', requireUser, async (req, res) => {
        WHERE created_at::date BETWEEN ?::date AND ?::date${creditScope.sql}
     `, [from, to, ...creditScope.params]);
 
+    // How much of each ingredient this date range actually consumed, and
+    // what's left right now — same reasoning and same 'sale'-typed
+    // inventory_entries rows as backend/routes/reports.js's own copy. The
+    // cloud has no recipes/recipe_ingredients table at all (recipes are a
+    // till-only concept — see cloud/db/schema.js), so re-deriving this from
+    // what was sold isn't possible here the way it is on the till; reading
+    // it off inventory_entries instead is what makes it possible on both.
+    const ingredientBranch = (req.user && req.user.branchId) || Number(req.query.branch) || 1;
+    const ingredientUsage = await db.q(`
+      SELECT i.local_id AS id, i.name, i.unit, i.stock AS current_stock,
+             COALESCE(-SUM(CASE WHEN ie.type = 'sale' THEN ie.amount ELSE 0 END)::float8, 0) AS used
+        FROM ingredients i
+        LEFT JOIN inventory_entries ie
+          ON ie.branch_id = i.branch_id AND ie.ingredient_local_id = i.local_id
+         AND ie.entry_date::date BETWEEN ?::date AND ?::date
+       WHERE i.branch_id = ?
+       GROUP BY i.local_id, i.name, i.unit, i.stock
+       ORDER BY i.name
+    `, [from, to, ingredientBranch]);
+
     const revenueTrend = prev.total_revenue > 0
       ? (((summary.total_revenue - prev.total_revenue) / prev.total_revenue) * 100).toFixed(1)
       : 0;
@@ -191,6 +211,7 @@ router.get('/kpi', requireUser, async (req, res) => {
       revenue_trend: revenueTrend,
       orders_trend: ordersTrend,
       credit_collected: Number(creditCollected.credit_collected) || 0,
+      ingredient_usage: ingredientUsage,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

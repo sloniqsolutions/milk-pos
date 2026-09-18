@@ -2,22 +2,9 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/database');
 const { syncUpsert } = require('../db/cloud-sync');
+const { recordEntry } = require('../db/inventory-entries');
 
 const today = () => new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD, local time
-
-const insertEntry = db.prepare(
-  'INSERT INTO inventory_entries (ingredient_id, type, amount, entry_date) VALUES (?, ?, ?, ?)'
-);
-const getEntry = db.prepare('SELECT * FROM inventory_entries WHERE id = ?');
-
-/** Records a stock movement locally and pushes it to the cloud — the
- * dashboard's own Stock History screen has nothing to show without this;
- * see cloud/routes/inventory.js's /history route and db/schema.js's
- * inventory_entries table. */
-function recordEntry(ingredientId, type, amount, entryDate) {
-  const id = insertEntry.run(ingredientId, type, amount, entryDate).lastInsertRowid;
-  syncUpsert('inventory_entries', getEntry.get(id));
-}
 
 // GET all ingredients
 router.get('/', (req, res) => {
