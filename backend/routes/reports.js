@@ -4,6 +4,7 @@ const db = require('../db/database');
 
 const { isAdminRole } = require('../middleware/auth');
 const { isRealDay, localDay } = require('../db/validate');
+const { unloggedSold } = require('../db/derived-usage');
 
 /**
  * Every report takes an optional from/to. An unreadable one (a typo, a
@@ -114,6 +115,19 @@ router.get('/kpi', (req, res) => {
        GROUP BY i.id, i.name, i.unit, i.stock
        ORDER BY i.name
     `).all(from, to);
+
+    // Sales restored from a till that never logged their stock movement (an
+    // older build): supplement, never double — see db/derived-usage.js.
+    try {
+      const unlogged = unloggedSold(from, to);
+      for (const row of ingredientUsage) {
+        let extra = 0;
+        for (const [key, amount] of unlogged) if (key.endsWith('|' + row.id)) extra += amount;
+        if (extra > 0) row.used = Number(row.used) + extra;
+      }
+    } catch (err) {
+      console.error('Unlogged-usage fallback failed (figures show logged movements only):', err.message);
+    }
 
     const revenueTrend = prev.total_revenue > 0
       ? (((summary.total_revenue - prev.total_revenue) / prev.total_revenue) * 100).toFixed(1)
@@ -238,6 +252,30 @@ router.get('/stock-movement', (req, res) => {
         waste_pct: wastePct, closing_balance: balance, days_remaining: daysRemaining,
       };
     });
+
+    // Days whose sales logged no movement (see db/derived-usage.js).
+    try {
+      for (const [key, amount] of unloggedSold(from, to)) {
+        const [date, idText] = key.split('|');
+        const ingredientId = Number(idText);
+        const existing = rows.find((r) => r.date === date && r.ingredient_id === ingredientId);
+        if (existing) {
+          existing.sold += amount;
+        } else {
+          const ingredient = ingredientById[ingredientId];
+          if (!ingredient) continue;
+          const raw = closingBalance(ingredientId, Number(ingredient.stock), date);
+          rows.push({
+            date, ingredient_id: ingredientId, name: ingredient.name, unit: ingredient.unit,
+            sold: amount, restocked: 0, converted: 0, waste: 0, waste_pct: 0,
+            closing_balance: Math.max(0, raw), days_remaining: null,
+          });
+        }
+      }
+      rows.sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
+    } catch (err) {
+      console.error('Unlogged-usage fallback failed (figures show logged movements only):', err.message);
+    }
 
     res.json(rows);
   } catch (err) {
