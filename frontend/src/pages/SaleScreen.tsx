@@ -6,6 +6,7 @@ import ReceiptModal from '@/components/pos/ReceiptModal';
 import CustomerPickerModal from '@/components/pos/CustomerPickerModal';
 import Modal from '@/components/pos-ui/Modal';
 import NoShiftOverlay from '@/components/pos-ui/NoShiftOverlay';
+import RefreshOverlay from '@/components/pos-ui/RefreshOverlay';
 import useDialogs from '@/lib/useDialogs';
 import { ordersAPI } from '@/api/index';
 import { Loader2, CreditCard } from 'lucide-react';
@@ -80,7 +81,7 @@ export default function SaleScreen({ onNavigate }: SaleScreenProps = {}) {
   const [receiptData, setReceiptData] = useState<ReceiptData | null>(null);
   const [confirmModalOpen, setConfirmModalOpen] = useState(false);
   const [noShiftPrompt, setNoShiftPrompt] = useState(false);
-  const { loading } = usePOS();
+  const { loading, refreshing } = usePOS();
   const { currentUser } = useAuth();
   const { alertCard, dialog } = useDialogs();
 
@@ -249,7 +250,8 @@ export default function SaleScreen({ onNavigate }: SaleScreenProps = {}) {
   }
 
   return (
-    <div style={{ flex: 1, height: '100vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ flex: 1, height: '100vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', position: 'relative' }}>
+      <RefreshOverlay visible={Boolean(refreshing)} label="Updating menu…" />
       <TopBar
         search={search}
         onSearchChange={setSearch}

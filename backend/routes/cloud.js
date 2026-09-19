@@ -216,6 +216,8 @@ router.post('/sync-now', requireAdmin, (req, res) => {
  * that they meant to press the one button here that cannot be undone.
  */
 let restoreInProgress = false;
+let restoreFailures = 0;
+let restoreLockedUntil = 0;
 
 router.post('/restore-from-cloud', requireAdmin, async (req, res) => {
   const pin = req.body && req.body.pin;
@@ -223,12 +225,33 @@ router.post('/restore-from-cloud', requireAdmin, async (req, res) => {
     return res.status(400).json({ error: 'Enter your PIN to confirm.' });
   }
 
-  const admin = db.prepare('SELECT id, pin FROM staff WHERE id = ?').get(req.user.staffId);
+  // Too many wrong PINs and this is refused for a minute — the PIN is the only
+  // thing standing between a signed-in admin session and replacing the database.
+  const now = Date.now();
+  if (now < restoreLockedUntil) {
+    const seconds = Math.ceil((restoreLockedUntil - now) / 1000);
+    return res.status(429).json({ error: `Too many incorrect PINs. Try again in ${seconds} second${seconds === 1 ? '' : 's'}.`, code: 'INVALID_PIN' });
+  }
+
+  // Any active administrator's PIN authorises this, not only the signed-in
+  // account's own: whoever holds an admin PIN is entitled to do it, and a
+  // signed-in admin should not be stuck because the account they happen to be
+  // using is not the one whose PIN they remember.
+  const admins = db.prepare(
+    "SELECT pin FROM staff WHERE active = 1 AND role IN ('Admin', 'Owner')").all();
   let pinOk = false;
-  try {
-    pinOk = Boolean(admin) && await bcrypt.compare(String(pin), admin.pin);
-  } catch (e) {
-    pinOk = false; // a hash that is not a real bcrypt hash can never match
+  for (const admin of admins) {
+    try {
+      if (await bcrypt.compare(String(pin), admin.pin)) { pinOk = true; break; }
+    } catch (e) {
+      // a stored value that is not a real bcrypt hash can never match
+    }
+  }
+  if (pinOk) {
+    restoreFailures = 0;
+  } else if (++restoreFailures >= 5) {
+    restoreFailures = 0;
+    restoreLockedUntil = Date.now() + 60 * 1000;
   }
   // The code matters: the frontend signs the user out on any 401, so without
   // it a mistyped PIN here logs them out of a perfectly valid session.

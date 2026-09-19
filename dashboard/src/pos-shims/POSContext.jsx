@@ -27,6 +27,8 @@ const POSContext = createContext(null);
 export function POSProvider({ children }) {
   const [menuItems, setMenuItems] = useState([]);
   const [loading, setLoading] = useState(true);
+  // True while the menu is being read back after a change (see RefreshOverlay).
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
 
   const refresh = useCallback(async () => {
@@ -44,6 +46,12 @@ export function POSProvider({ children }) {
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  // A change made from another window or device shows up when this one is next looked at.
+  useEffect(() => {
+    window.addEventListener('focus', refresh);
+    return () => window.removeEventListener('focus', refresh);
+  }, [refresh]);
+
   /**
    * Run a write, then re-read.
    *
@@ -53,6 +61,7 @@ export function POSProvider({ children }) {
    * successful one.
    */
   const mutate = useCallback(async (fn) => {
+    setRefreshing(true);
     try {
       await fn();
       setError(null);
@@ -61,11 +70,13 @@ export function POSProvider({ children }) {
       setError(err);
     }
     await refresh();
+    setRefreshing(false);
   }, [refresh]);
 
   const value = {
     menuItems,
     loading,
+    refreshing,
     error,
     refresh,
     addMenuItem: (item) => mutate(() => menuAPI.create(item)),

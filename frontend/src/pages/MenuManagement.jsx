@@ -7,6 +7,7 @@ import { useSettings } from '@/lib/SettingsContext';
 import { useAuth } from '@/context/AuthContext';
 import SearchBar from '@/components/pos-ui/SearchBar';
 import useDialogs from '@/lib/useDialogs';
+import RefreshOverlay from '@/components/pos-ui/RefreshOverlay';
 
 export const categoriesList = MENU_CATEGORIES;
 
@@ -38,7 +39,7 @@ const isUniversalItem = (item) =>
 export default function MenuManagement() {
   const { formatMoney } = useSettings();
   const { isAdmin } = useAuth();
-  const { menuItems, addMenuItem, updateMenuItem, deleteMenuItem, loading } = usePOS();
+  const { menuItems, addMenuItem, updateMenuItem, deleteMenuItem, loading, refreshing } = usePOS();
   const [search, setSearch] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState(null);
@@ -99,7 +100,8 @@ export default function MenuManagement() {
   }
 
   return (
-    <div className="flex-1 h-full overflow-y-auto" style={{ padding: 24, background: '#F7F9FC' }}>
+    <div className="flex-1 h-full" style={{ position: 'relative' }}>
+    <div className="h-full overflow-y-auto" style={{ padding: 24, background: '#F7F9FC' }}>
       <div style={{ maxWidth: 900, margin: '0 auto' }}>
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 24 }}>
@@ -250,6 +252,10 @@ export default function MenuManagement() {
         />
       )}
       {dialog}
+    </div>
+    {/* Editing one size re-prices its siblings on the server; this covers the
+        moment between saving and the whole list being read back. */}
+    <RefreshOverlay visible={Boolean(refreshing)} label="Updating prices…" />
     </div>
   );
 }

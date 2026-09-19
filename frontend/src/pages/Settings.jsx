@@ -1281,7 +1281,7 @@ export default function Settings() {
           ) : (
             <div style={{ background: '#FFFFFF', border: '1px solid #FDE68A', borderRadius: 10, padding: 14 }}>
               <label style={{ display: 'block', marginBottom: 10 }}>
-                <span style={{ fontSize: 13, fontWeight: 600, color: '#374151' }}>Enter your PIN to confirm</span>
+                <span style={{ fontSize: 13, fontWeight: 600, color: '#374151' }}>Enter an administrator PIN to confirm</span>
                 <input
                   type="password"
                   autoFocus

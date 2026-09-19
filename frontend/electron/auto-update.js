@@ -75,7 +75,9 @@ function initAutoUpdater(mainWindow, log) {
   });
 
   ipcMain.handle('update-install', () => {
-    autoUpdater.quitAndInstall();
+    // Silent, and reopen the app afterwards: the cashier clicks once and the till
+    // comes back on the new version, instead of stopping at an installer wizard.
+    autoUpdater.quitAndInstall(true, true);
   });
 
   const check = () => autoUpdater.checkForUpdates().catch((err) => {
