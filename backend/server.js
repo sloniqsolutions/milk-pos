@@ -114,20 +114,69 @@ app.get('/api/backup', requireAdmin, (req, res) => {
   res.download(dbPath, `pos_backup_${date}.db`);
 });
 
-// Rejected CORS preflights arrive here as errors; answer them cleanly instead
-// of leaking a stack trace.
+// Anything under /api that no route claimed: a clear answer, not an HTML error page.
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'That request was not recognised. Please update the app or contact support.' });
+});
+
+/**
+ * The last line of defence. Whatever a route lets escape — a malformed body, a
+ * value of the wrong type reaching the database, a constraint it did not
+ * foresee — ends here as a plain-language answer the till can show, never a
+ * stack trace or a raw SQL message, and never takes the process down.
+ */
 app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
   if (err && /Origin not allowed/.test(err.message)) {
     return res.status(403).json({ error: 'Origin not allowed' });
   }
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'The request could not be read. Please try again.', code: 'BAD_REQUEST' });
+  }
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'That upload is too large.', code: 'TOO_LARGE' });
+  }
+  if (err && /SQLite3 can only bind/.test(String(err.message))) {
+    return res.status(400).json({ error: 'Some of the information sent was in the wrong format. Please check it and try again.', code: 'BAD_INPUT' });
+  }
+  if (err && /^SQLITE_CONSTRAINT/.test(String(err.code || ''))) {
+    return res.status(409).json({ error: 'That change conflicts with information already saved. Refresh the page and try again.', code: 'CONFLICT' });
+  }
   console.error('Unhandled error:', err);
-  res.status(500).json({ error: 'Internal server error' });
+  res.status(500).json({ error: 'Something went wrong on our side. Nothing was lost — please try again.', code: 'INTERNAL' });
+});
+
+// A rejected promise nobody awaited (a background sync, say) must never end the
+// till's process mid-sale.
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason);
 });
 
 // Port conflict handling
 const server = app.listen(PORT, HOST, () => {
   console.log(`POS Backend running on http://${HOST}:${PORT}`);
 });
+
+/**
+ * The one exception to "sync waits for the first sign-in": a brand-new install
+ * (paired by the installer, holding no data at all) catches up with its
+ * branch's staff and history here, at boot, *before* anyone signs in — so the
+ * first person to reach the PIN screen already sees the real roster, and no
+ * session exists yet that the swap could invalidate. It does nothing on a
+ * device that has data of its own, and stops for good once it has run. See
+ * sync/bootstrap.js.
+ */
+require('./sync/bootstrap').startBootstrap();
+
+// Milk and Dahi items that reached this till without a recipe (from the
+// dashboard, or typed at the Menu screen) sold without moving any stock; give
+// them the recipe their size implies so their sales show up in stock reports.
+try {
+  const fixed = require('./db/menu-pricing').backfillMissingRecipes();
+  if (fixed > 0) console.log(`Added recipes to ${fixed} menu item(s) that had none.`);
+} catch (err) {
+  console.error('Recipe backfill skipped:', err.message);
+}
 
 /**
  * Cloud sync starts on the first sign-in of this process's life, not at
@@ -156,6 +205,24 @@ require('./middleware/auth').setOnFirstSignIn(() => {
   // Uploads the till's own daily backup to the cloud (see
   // backend/sync/backup-push.js) — same no-op-until-paired behaviour.
   require('./sync/backup-push').startBackupPush();
+
+  // One-time: re-file this till's earlier stock movements on the cloud under
+  // the right ingredient (see db/cloud-sync.js's pushInventoryEntriesResync).
+  // Remembered only once the cloud has actually accepted all of them.
+  try {
+    const localDb = require('./db/database');
+    const done = localDb.prepare("SELECT value FROM settings WHERE key = 'entries_name_resync_v1'").get();
+    if (!done) {
+      require('./db/cloud-sync').pushInventoryEntriesResync().then((ok) => {
+        if (ok) {
+          localDb.prepare(
+            "INSERT INTO settings (key, value) VALUES ('entries_name_resync_v1', '1') ON CONFLICT(key) DO UPDATE SET value = '1'").run();
+        }
+      }).catch((err) => console.error('[Cloud] Stock movement resync will retry:', err.message));
+    }
+  } catch (err) {
+    console.error('[Cloud] Stock movement resync skipped:', err.message);
+  }
 });
 
 server.on('error', (err) => {

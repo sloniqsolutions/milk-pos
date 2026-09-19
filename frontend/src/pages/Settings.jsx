@@ -276,7 +276,7 @@ export default function Settings() {
       // easy to mistake for the restore itself having failed silently.
       await alertCard({
         title: 'Restore Complete',
-        message: `Restored ${result.restored.orders} orders, ${result.restored.customers} customers, ${result.restored.staff} staff and ${result.restored.shifts} shifts from the cloud. Sign in again to continue — this device's session doesn't carry over a restore.`,
+        message: `Restored ${result.restored.orders} orders, ${result.restored.customers} customers, ${result.restored.staff} staff and ${result.restored.shifts} shifts from the cloud.${result.kept_local_admin ? ` None of the restored accounts is an administrator with a known PIN, so ${result.kept_local_admin} was kept — you can still sign in with it.` : ''} Sign in again to continue — this device's session doesn't carry over a restore.`,
         tone: 'success',
       });
       logout();

@@ -455,18 +455,22 @@ router.get('/snapshot', requireBranch, async (req, res) => {
     const [version, staff, deleted] = await Promise.all([
       db.one('SELECT version FROM staff_version WHERE id = 1'),
       db.q(
-        `SELECT local_id, name, role, color, active, pin_hash, origin
+        `SELECT local_id, name, role, color, active, pin_hash, origin, device_id
            FROM staff WHERE branch_id = ? ORDER BY local_id`,
         [req.branch.id]),
       // Stated, not inferred. The till never treats an absence as a deletion,
       // because a row it has not pushed yet is absent too.
-      db.q('SELECT local_id FROM staff_deletions WHERE branch_id = ?', [req.branch.id]),
+      db.q('SELECT local_id, name, device_id FROM staff_deletions WHERE branch_id = ?', [req.branch.id]),
     ]);
     res.json({
       version: version ? Number(version.version) : 0,
       branch_id: req.branch.id,
       staff,
       deleted: deleted.map(d => Number(d.local_id)),
+      // Which person each number belonged to. A bare number means a different
+      // person on every till that numbered its own staff from 1 — see
+      // backend/sync/downlink.js's applyStaff for how a till uses this.
+      deleted_rows: deleted.map(d => ({ local_id: Number(d.local_id), name: d.name, device_id: d.device_id })),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

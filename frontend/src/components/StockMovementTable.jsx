@@ -7,66 +7,80 @@ const fmtQty = (n) => {
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
 };
 
+/** Movements are stored by calendar day; tolerate a full timestamp rather than splitting one day into two rows. */
+const dayOf = (value) => String(value || '').slice(0, 10);
+
 const thStyle = {
   padding: '10px 12px', textAlign: 'right', fontSize: 11, fontWeight: 600,
   color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.03em',
   whiteSpace: 'nowrap', borderBottom: '1px solid #E5E7EB',
 };
 
+// Sold / Restocked / Converted / Waste / Balance, per ingredient.
+const COLS_PER_INGREDIENT = 5;
+
 /**
  * One row per DAY, sales and every ingredient's stock movement side by
  * side — merged on request rather than kept as two separate tables, since
- * a day's sales and what it cost in stock are one story, not two. Columns
- * per ingredient are built from whatever ingredients actually appear in
- * `stockMovement` rather than hardcoded to Milk/Dahi, so a third ingredient
- * just shows up here on its own.
+ * a day's sales and what it cost in stock are one story, not two.
+ *
+ * Which ingredients get a column: every one in `ingredientNames` (the full
+ * ingredient list, so Milk still has its column on a week where only Yogurt
+ * happened to move — leaving it out made the table look as though Milk had
+ * simply not been tracked), plus any that appear in `stockMovement` that the
+ * list didn't mention. Nothing is hardcoded to Milk/Dahi, so a third
+ * ingredient just shows up here on its own.
  *
  * Reused by Reports.jsx (inline, under its own Summary tab) and
  * SummaryReportScreen.jsx (the full-screen version) — one definition, so
  * the two can never drift into showing different numbers for the same day.
  */
-export default function StockMovementTable({ salesByDay, stockMovement, formatMoney, loading }) {
-  const { rows, ingredientNames } = useMemo(() => {
-    const names = Array.from(new Set((stockMovement || []).map((r) => r.name))).sort();
+export default function StockMovementTable({ salesByDay, stockMovement, ingredientNames, formatMoney, loading }) {
+  const { rows, names } = useMemo(() => {
+    const seen = new Set();
+    const names = [];
+    [...(ingredientNames || []), ...(stockMovement || []).map((r) => r.name)].forEach((n) => {
+      if (n && !seen.has(n)) { seen.add(n); names.push(n); }
+    });
+    names.sort();
+
     const byDate = {};
     (salesByDay || []).forEach((d) => {
-      byDate[d.date] = { date: d.date, orders: d.orders, revenue: d.revenue, discounts: d.discounts, net: d.net, byIngredient: {} };
+      byDate[dayOf(d.date)] = { date: dayOf(d.date), orders: d.orders, net: d.net, byIngredient: {} };
     });
     (stockMovement || []).forEach((r) => {
-      if (!byDate[r.date]) byDate[r.date] = { date: r.date, orders: 0, revenue: 0, discounts: 0, net: 0, byIngredient: {} };
-      byDate[r.date].byIngredient[r.name] = r;
+      const day = dayOf(r.date);
+      if (!day) return;
+      if (!byDate[day]) byDate[day] = { date: day, orders: 0, net: 0, byIngredient: {} };
+      byDate[day].byIngredient[r.name] = r;
     });
     const rows = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
-    return { rows, ingredientNames: names };
-  }, [salesByDay, stockMovement]);
+    return { rows, names };
+  }, [salesByDay, stockMovement, ingredientNames]);
 
-  const colCount = 5 + ingredientNames.length * 7;
+  const colCount = 3 + names.length * COLS_PER_INGREDIENT;
 
   return (
     <div style={{ background: '#FFFFFF', borderRadius: 12, border: '1px solid #E5E7EB', overflow: 'auto' }}>
-      <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 620 + ingredientNames.length * 620 }}>
+      <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 380 + names.length * 420 }}>
         <thead>
           <tr style={{ background: '#F9FAFB' }}>
             <th rowSpan={2} style={{ ...thStyle, textAlign: 'left', verticalAlign: 'bottom' }}>Date</th>
-            <th colSpan={4} style={{ ...thStyle, textAlign: 'center', borderLeft: '1px solid #E5E7EB', fontWeight: 700, color: '#374151' }}>Sales</th>
-            {ingredientNames.map((name) => (
-              <th key={name} colSpan={7} style={{ ...thStyle, textAlign: 'center', borderLeft: '1px solid #E5E7EB', fontWeight: 700, color: '#374151' }}>{name}</th>
+            <th colSpan={2} style={{ ...thStyle, textAlign: 'center', borderLeft: '1px solid #E5E7EB', fontWeight: 700, color: '#374151' }}>Sales</th>
+            {names.map((name) => (
+              <th key={name} colSpan={COLS_PER_INGREDIENT} style={{ ...thStyle, textAlign: 'center', borderLeft: '1px solid #E5E7EB', fontWeight: 700, color: '#374151' }}>{name}</th>
             ))}
           </tr>
           <tr style={{ background: '#F9FAFB' }}>
             <th style={{ ...thStyle, textAlign: 'center', borderLeft: '1px solid #E5E7EB' }}>Orders</th>
-            <th style={thStyle}>Gross</th>
-            <th style={thStyle}>Discounts</th>
             <th style={{ ...thStyle, color: '#EA580C' }}>Net</th>
-            {ingredientNames.map((name) => (
+            {names.map((name) => (
               <React.Fragment key={name}>
                 <th style={{ ...thStyle, borderLeft: '1px solid #E5E7EB' }}>Sold</th>
                 <th style={thStyle}>Restocked</th>
                 <th style={thStyle}>Converted</th>
                 <th style={thStyle}>Waste</th>
-                <th style={thStyle}>Waste %</th>
                 <th style={thStyle}>Balance</th>
-                <th style={thStyle}>Days Left</th>
               </React.Fragment>
             ))}
           </tr>
@@ -83,10 +97,8 @@ export default function StockMovementTable({ salesByDay, stockMovement, formatMo
                   {moment(r.date).format('MMM D, YYYY')}
                 </td>
                 <td style={{ padding: '10px 12px', textAlign: 'center', color: '#374151', borderLeft: '1px solid #F3F4F6' }}>{r.orders}</td>
-                <td style={{ padding: '10px 12px', textAlign: 'right', color: '#374151' }}>{formatMoney(r.revenue)}</td>
-                <td style={{ padding: '10px 12px', textAlign: 'right', color: '#EF4444' }}>-{formatMoney(r.discounts)}</td>
                 <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: '#111827' }}>{formatMoney(r.net)}</td>
-                {ingredientNames.map((name) => {
+                {names.map((name) => {
                   const ing = r.byIngredient[name];
                   return (
                     <React.Fragment key={name}>
@@ -102,14 +114,8 @@ export default function StockMovementTable({ salesByDay, stockMovement, formatMo
                       <td style={{ padding: '10px 12px', textAlign: 'right', color: '#EF4444' }}>
                         {ing && ing.waste > 0 ? `-${fmtQty(ing.waste)} ${ing.unit}` : '—'}
                       </td>
-                      <td style={{ padding: '10px 12px', textAlign: 'right', color: '#6B7280' }}>
-                        {ing && ing.waste > 0 ? `${fmtQty(ing.waste_pct)}%` : '—'}
-                      </td>
                       <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: '#111827' }}>
                         {ing && ing.closing_balance != null ? `${fmtQty(ing.closing_balance)} ${ing.unit}` : '—'}
-                      </td>
-                      <td style={{ padding: '10px 12px', textAlign: 'right', color: '#6B7280' }}>
-                        {ing && ing.days_remaining != null ? `${fmtQty(ing.days_remaining)}d` : '—'}
                       </td>
                     </React.Fragment>
                   );

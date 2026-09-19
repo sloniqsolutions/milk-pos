@@ -5,6 +5,12 @@ const { syncUpsert, syncUpsertMany } = require('../db/cloud-sync');
 const { getCustomerSummary } = require('../db/customer-summary');
 const { buildOrderSyncPayload } = require('../db/order-sync-payload');
 const { recordEntry } = require('../db/inventory-entries');
+const { toNumber } = require('../db/validate');
+
+/** Guard rails on a single sale: a typo (9999 packs) is refused before it touches stock. */
+const MAX_LINES = 100;
+const MAX_QUANTITY = 1000;      // per line — litres or grams both fit under this
+const MAX_UNIT_PRICE = 1000000;
 
 const today = () => new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD, local time
 
@@ -14,10 +20,45 @@ router.post('/', (req, res) => {
     items, total, discount, payment_method, cashier_id, cashier_name,
     order_type, delivery_charge, table_number,
     customer_name, customer_phone, customer_address, customer_id,
-  } = req.body;
+  } = req.body || {};
 
-  if (!items || items.length === 0) {
-    return res.status(400).json({ error: 'Order must have at least one item' });
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'Add at least one item to the order before charging.' });
+  }
+  if (items.length > MAX_LINES) {
+    return res.status(400).json({ error: `An order can have at most ${MAX_LINES} different items. Split it into two orders.` });
+  }
+
+  // Every line is checked before anything is priced or deducted. The menu
+  // lookup is what catches an item that was retired or removed after it went
+  // into the cart (on this till or another): it is refused by name instead of
+  // being sold as a ghost line that no report can place.
+  const findMenuItem = db.prepare('SELECT id, name, active FROM menu_items WHERE id = ?');
+  for (const item of items) {
+    if (!item || typeof item !== 'object') {
+      return res.status(400).json({ error: 'One of the items in this order is not valid. Clear the cart and add it again.' });
+    }
+    const label = (typeof item.name === 'string' && item.name.trim()) || 'An item';
+    const qty = toNumber(item.quantity);
+    const price = toNumber(item.price);
+    if (!(qty > 0)) {
+      return res.status(400).json({ error: `"${label}" needs a quantity greater than zero.` });
+    }
+    if (qty > MAX_QUANTITY) {
+      return res.status(400).json({ error: `"${label}": a quantity of ${qty} looks like a typing mistake. The most one order line can carry is ${MAX_QUANTITY}.` });
+    }
+    if (!(price >= 0) || price > MAX_UNIT_PRICE) {
+      return res.status(400).json({ error: `"${label}" has a price that is not valid. Remove it and add it again.` });
+    }
+    if (!item.is_deal) {
+      const menuItem = Number.isInteger(Number(item.id)) ? findMenuItem.get(Number(item.id)) : null;
+      if (!menuItem || !menuItem.active) {
+        return res.status(409).json({
+          error: `"${label}" is no longer on the menu, so it can't be sold. Remove it from the cart and try again.`,
+          code: 'ITEM_UNAVAILABLE',
+        });
+      }
+    }
   }
 
   // FIX (Bug 6): discount and payment_method were always sent as 0/'Cash'
@@ -26,8 +67,16 @@ router.post('/', (req, res) => {
   const VALID_PAYMENTS = ['Cash', 'Card', 'Online', 'Credit'];
   const paymentMethod = VALID_PAYMENTS.includes(payment_method) ? payment_method : 'Cash';
 
-  if (paymentMethod === 'Credit' && !customer_id) {
-    return res.status(400).json({ error: 'Select a customer for a credit sale' });
+  if (paymentMethod === 'Credit') {
+    if (!customer_id) {
+      return res.status(400).json({ error: 'Select a customer for a credit sale.' });
+    }
+    // A credit sale to a customer who was removed (or a stale id) would post a
+    // debt to nobody. Refused up front, by name of the problem.
+    const debtor = db.prepare('SELECT id, active FROM customers WHERE id = ?').get(customer_id);
+    if (!debtor || !debtor.active) {
+      return res.status(409).json({ error: 'That customer is no longer on the customer list. Choose another customer for this credit sale.', code: 'CUSTOMER_UNAVAILABLE' });
+    }
   }
 
   const safeDiscount = Math.max(0, Number(discount) || 0);
@@ -274,10 +323,16 @@ router.get('/', (req, res) => {
     if (orders.length === 0) return res.json([]);
 
     const orderIds = orders.map(o => o.id);
-    const placeholders = orderIds.map(() => '?').join(',');
-    const allItems = db.prepare(
-      `SELECT * FROM order_items WHERE order_id IN (${placeholders})` 
-    ).all(...orderIds);
+    // In chunks: one bound variable per order, and SQLite refuses a statement
+    // with too many of them — an unfiltered list on a long-running till would
+    // otherwise fail outright instead of just being long.
+    const allItems = [];
+    for (let i = 0; i < orderIds.length; i += 500) {
+      const chunk = orderIds.slice(i, i + 500);
+      allItems.push(...db.prepare(
+        `SELECT * FROM order_items WHERE order_id IN (${chunk.map(() => '?').join(',')})`
+      ).all(...chunk));
+    }
 
     const formatted = orders.map(o => ({
       ...o,

@@ -21,7 +21,7 @@ router.get('/status', (req, res) => {
 });
 
 router.post('/activate', async (req, res) => {
-  const key = String((req.body && req.body.key) || '').trim();
+  const key = typeof (req.body && req.body.key) === 'string' ? req.body.key.trim().slice(0, 200) : '';
   if (!key) return res.status(400).json({ error: 'Enter the product key.' });
 
   const deviceId = getDeviceId();
@@ -36,7 +36,14 @@ router.post('/activate', async (req, res) => {
     writeActivation({ device_id: deviceId, activated_at: new Date().toISOString() });
     res.json({ activated: true, label: result.label || null });
   } catch (err) {
-    res.status(400).json({ error: err.message || 'Could not activate.' });
+    // A dropped connection, DNS failure or timeout comes back as a raw socket
+    // message ("connect ECONNREFUSED 127.0.0.1:4000"). Say what it means instead.
+    const network = /ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|timed out|socket|network/i.test(String(err && err.message));
+    res.status(network ? 503 : 400).json({
+      error: network
+        ? "We couldn't reach the activation service. Check this computer's internet connection and try again."
+        : (err.message || 'Could not activate.'),
+    });
   }
 });
 

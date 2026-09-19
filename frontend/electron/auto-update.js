@@ -10,22 +10,28 @@
  * clicks the banner main.js's `update-available` message triggers in the
  * renderer (see src/components/UpdateBanner.jsx).
  *
- * The repo is private, so every request needs a token — electron-updater
- * reads one from the GH_TOKEN or GITHUB_TOKEN environment variable on this
- * machine automatically (see node_modules/electron-updater/out/providerFactory.js).
- * Nothing here ever holds or ships that token: it lives only in this
- * machine's own environment, set once with
- * `setx GH_TOKEN "<a read-only, repo-scoped fine-grained PAT>"` and picked up
- * by every launch after. Without it, checks fail with a 401/404 — logged
- * below, not surfaced to the cashier, since a missing update is never worth
- * interrupting a sale over.
+ * The releases are public, so a till needs no credentials to look for one —
+ * package.json's `build.publish` deliberately does NOT say `private: true`.
+ * (With it, electron-updater insists on a GH_TOKEN on every machine and finds
+ * nothing without one, so a shop's second PC could never have updated.) If the
+ * releases ever move to a private repo, this needs a different arrangement, not
+ * a token baked into the app.
+ *
+ * A failed check (offline, GitHub down) is logged, never surfaced to the
+ * cashier: a missing update is never worth interrupting a sale over.
  */
+
+/** How often a till that stays open for days looks for a new release. */
+const RECHECK_MS = 4 * 60 * 60 * 1000;
 
 const { autoUpdater } = require('electron-updater');
 
 function initAutoUpdater(mainWindow, log) {
   autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = false;
+  // Only takes effect once an update has actually been downloaded (the banner's
+  // button): if the cashier downloads it and carries on selling, it installs
+  // when they next close the app, instead of waiting for a click that may never come.
+  autoUpdater.autoInstallOnAppQuit = true;
 
   const send = (channel, payload) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
@@ -72,9 +78,13 @@ function initAutoUpdater(mainWindow, log) {
     autoUpdater.quitAndInstall();
   });
 
-  autoUpdater.checkForUpdates().catch((err) => {
-    log('[Update] Initial check failed: ' + err.message);
+  const check = () => autoUpdater.checkForUpdates().catch((err) => {
+    log('[Update] Check failed: ' + err.message);
   });
+  check();
+  // Once at launch is not enough for a till that is left open for days.
+  const timer = setInterval(check, RECHECK_MS);
+  if (typeof timer.unref === 'function') timer.unref();
 }
 
 module.exports = { initAutoUpdater };

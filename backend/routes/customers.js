@@ -4,6 +4,37 @@ const db = require('../db/database');
 const { syncUpsert } = require('../db/cloud-sync');
 const { getCustomerSummary } = require('../db/customer-summary');
 const { getLitresByOrderIds } = require('../db/order-litres');
+const { clean, toNumber } = require('../db/validate');
+
+/**
+ * Checks and normalises the fields a customer is created or edited with.
+ * Returns { error } or { value }. A phone number, when given, has to look like
+ * one (digits with optional + - spaces and brackets) and must not already
+ * belong to another customer: a restore re-links every credit order to its
+ * customer *by phone number*, so two customers sharing one would have their
+ * ledgers merged into whichever came first.
+ */
+function checkCustomer(body, ignoreId) {
+  const name = clean(body && body.name, 100);
+  if (!name) return { error: 'Enter the customer\'s name.' };
+  const phone = clean(body && body.phone, 25);
+  if (phone) {
+    const digits = phone.replace(/\D/g, '');
+    if (!/^[+()\-\s\d]+$/.test(phone) || digits.length < 7 || digits.length > 15) {
+      return { error: 'That phone number does not look right. Use digits only, for example 0300 1234567.' };
+    }
+    const twin = db.prepare('SELECT id, name FROM customers WHERE phone = ? AND active = 1 AND id != ?').get(phone, ignoreId || 0);
+    if (twin) return { error: `${twin.name} already has this phone number. Open that customer instead of adding a second one.` };
+  }
+  return {
+    value: {
+      name,
+      phone: phone || null,
+      address: clean(body && body.address, 200) || null,
+      notes: clean(body && body.notes, 500) || null,
+    },
+  };
+}
 
 // Whitelisted so a bad ?sort= value can't be used to inject SQL — same
 // reasoning as VALID_PAYMENTS in orders.js.
@@ -75,10 +106,9 @@ router.get('/', (req, res) => {
 
 // POST /api/customers — create
 router.post('/', (req, res) => {
-  const { name, phone, address, notes } = req.body;
-  if (!name || !String(name).trim()) {
-    return res.status(400).json({ error: 'Customer name is required' });
-  }
+  const checked = checkCustomer(req.body);
+  if (checked.error) return res.status(400).json({ error: checked.error });
+  const { name, phone, address, notes } = checked.value;
 
   try {
     // Explicit id under 10000 — see backend/routes/staff.js's identical
@@ -87,13 +117,7 @@ router.post('/', (req, res) => {
     const nextId = db.prepare('SELECT COALESCE(MAX(id), 0) + 1 AS id FROM customers WHERE id < 10000').get().id;
     const result = db.prepare(
       'INSERT INTO customers (id, name, phone, address, notes) VALUES (?, ?, ?, ?, ?)'
-    ).run(
-      nextId,
-      String(name).trim(),
-      (phone && String(phone).trim()) || null,
-      (address && String(address).trim()) || null,
-      (notes && String(notes).trim()) || null
-    );
+    ).run(nextId, name, phone, address, notes);
     syncUpsert('customers', getCustomerSummary(result.lastInsertRowid));
     res.status(201).json({ id: result.lastInsertRowid });
   } catch (err) {
@@ -172,20 +196,13 @@ router.put('/:id', (req, res) => {
   const customer = db.prepare('SELECT id FROM customers WHERE id = ?').get(req.params.id);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-  const { name, phone, address, notes } = req.body;
-  if (!name || !String(name).trim()) {
-    return res.status(400).json({ error: 'Customer name is required' });
-  }
+  const checked = checkCustomer(req.body, customer.id);
+  if (checked.error) return res.status(400).json({ error: checked.error });
+  const { name, phone, address, notes } = checked.value;
 
   db.prepare(
     'UPDATE customers SET name = ?, phone = ?, address = ?, notes = ? WHERE id = ?'
-  ).run(
-    String(name).trim(),
-    (phone && String(phone).trim()) || null,
-    (address && String(address).trim()) || null,
-    (notes && String(notes).trim()) || null,
-    req.params.id
-  );
+  ).run(name, phone, address, notes, customer.id);
   syncUpsert('customers', getCustomerSummary(req.params.id));
   res.json({ success: true });
 });
@@ -195,9 +212,13 @@ router.post('/:id/payments', (req, res) => {
   const customer = db.prepare('SELECT id FROM customers WHERE id = ?').get(req.params.id);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-  const amount = Number(req.body.amount);
-  if (!amount || amount <= 0) {
-    return res.status(400).json({ error: 'Payment amount must be greater than zero' });
+  const rawAmount = toNumber(req.body && req.body.amount);
+  if (!(rawAmount > 0) || rawAmount > 1000000000) {
+    return res.status(400).json({ error: 'Enter a payment amount greater than zero.' });
+  }
+  const amount = Math.round(rawAmount * 100) / 100;
+  if (!(amount > 0)) {
+    return res.status(400).json({ error: 'Enter a payment amount of at least one paisa (0.01).' });
   }
 
   // A payment can never exceed what the customer actually owes — otherwise
@@ -210,7 +231,7 @@ router.post('/:id/payments', (req, res) => {
   const paidTotal = db.prepare(
     'SELECT COALESCE(SUM(amount), 0) as total FROM credit_payments WHERE customer_id = ?'
   ).get(req.params.id).total;
-  const balance = creditTotal - paidTotal;
+  const balance = Math.round((creditTotal - paidTotal) * 100) / 100;
 
   if (amount > balance) {
     return res.status(400).json({
@@ -233,7 +254,7 @@ router.post('/:id/payments', (req, res) => {
   ).run(
     req.params.id,
     amount,
-    (req.body.note && String(req.body.note).trim()) || null,
+    clean(req.body && req.body.note, 300) || null,
     // Attribution from the session, same reasoning as void/order attribution
     // in orders.js — never trust the body for who did this.
     (req.user && req.user.name) || 'Unknown',

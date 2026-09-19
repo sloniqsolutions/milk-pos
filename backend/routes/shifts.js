@@ -2,6 +2,10 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/database');
 const { syncUpsert } = require('../db/cloud-sync');
+const { clean, toNumber } = require('../db/validate');
+
+/** Largest cash figure accepted for a drawer count — well beyond any real float, small enough to catch a typo. */
+const MAX_CASH = 100000000;
 
 /**
  * Shift management.
@@ -131,7 +135,11 @@ router.get('/:id/summary', (req, res) => {
 
 // POST open a shift
 router.post('/open', (req, res) => {
-  const { opening_cash, staff_id, staff_name } = req.body;
+  const { opening_cash } = req.body || {};
+  const float = opening_cash === undefined || opening_cash === null || opening_cash === '' ? 0 : toNumber(opening_cash);
+  if (!(float >= 0) || float > MAX_CASH) {
+    return res.status(400).json({ error: 'Enter the opening cash as an amount of zero or more.' });
+  }
 
   try {
     const existing = getOpenShiftStmt.get();
@@ -143,7 +151,12 @@ router.post('/open', (req, res) => {
     const result = db.prepare(`
       INSERT INTO shifts (staff_id, staff_name, opening_cash, status, opened_at)
       VALUES (?, ?, ?, 'open', datetime('now', 'localtime'))
-    `).run(staff_id || null, staff_name || 'Unknown', Number(opening_cash) || 0);
+    `).run(
+      // Who opened it comes from the signed-in session, never the request body.
+      (req.user && req.user.staffId) || null,
+      (req.user && req.user.name) || clean(req.body && req.body.staff_name, 80) || 'Unknown',
+      float
+    );
 
     const shift = db.prepare('SELECT * FROM shifts WHERE id = ?').get(result.lastInsertRowid);
     syncUpsert('shifts', shift);
@@ -155,11 +168,17 @@ router.post('/open', (req, res) => {
 
 // POST close the open shift
 router.post('/close', (req, res) => {
-  const { closing_cash } = req.body;
+  const { closing_cash } = req.body || {};
+  // A missing or unreadable count used to be treated as 0, which closed the
+  // shift with a huge false shortfall. The count is required, and must be a number.
+  const counted = toNumber(closing_cash);
+  if (!(counted >= 0) || counted > MAX_CASH) {
+    return res.status(400).json({ error: 'Enter the cash you counted in the drawer (zero or more) to close the shift.' });
+  }
 
   try {
     const shift = getOpenShiftStmt.get();
-    if (!shift) return res.status(404).json({ error: 'No open shift to close' });
+    if (!shift) return res.status(409).json({ error: 'There is no open shift to close.' });
 
     const totals = shiftTotalsStmt.get(shift.id);
     const spend = shiftExpensesStmt.get(shift.id);
@@ -174,7 +193,7 @@ router.post('/close', (req, res) => {
       Number(totals.cash_revenue || 0) +
       Number(credit.credit_collected || 0) -
       Number(spend.drawer_expenses || 0);
-    const actual = Number(closing_cash) || 0;
+    const actual = counted;
 
     db.prepare(`
       UPDATE shifts

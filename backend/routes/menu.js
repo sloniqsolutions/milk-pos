@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db/database');
-const { cascadeUniversalPricing, derivedPriceFor } = require('../db/menu-pricing');
+const { cascadeUniversalPricing, derivedPriceFor, ensureRecipeForItem } = require('../db/menu-pricing');
+const { clean } = require('../db/validate');
 const { syncMenuUpsert } = require('../db/cloud-sync');
 
 /**
@@ -53,20 +54,44 @@ router.get('/', (req, res) => {
   }
 });
 
+/**
+ * Checks the fields every create/update shares. Returns an error message, or
+ * null when the item is fine. Messages are written for the person at the till,
+ * not for a developer.
+ */
+function checkItemFields({ name, category, price, variants }, hasVariants, ignoreId) {
+  const itemName = clean(name, 80);
+  const itemCategory = clean(category, 40);
+  if (!itemName || !itemCategory) return 'Enter a name and choose a category for this item.';
+  if (!hasVariants) {
+    const p = Number(price);
+    if (price === undefined || price === null || price === '' || !Number.isFinite(p)) {
+      return 'Enter a price for this item.';
+    }
+    if (p <= 0) return 'The price must be greater than zero.';
+    if (p > 10000000) return 'That price is too large. Please check it and try again.';
+  }
+  if (Array.isArray(variants) && variants.length > 50) return 'An item can have at most 50 sizes.';
+  const twin = db.prepare(
+    'SELECT id FROM menu_items WHERE active = 1 AND LOWER(name) = LOWER(?) AND LOWER(category) = LOWER(?) AND id != ?'
+  ).get(itemName, itemCategory, ignoreId || 0);
+  if (twin) return `"${itemName}" is already on the menu under ${itemCategory}. Edit that item instead, or choose a different name.`;
+  return null;
+}
+
 // Add new item
 router.post('/', (req, res) => {
-  const { name, category, price, image_url, variants, description } = req.body;
-  
+  const { name, category, price, image_url, variants, description } = req.body || {};
+
   if (!name || !category) {
-    return res.status(400).json({ error: 'name and category are required' });
+    return res.status(400).json({ error: 'Enter a name and choose a category for this item.' });
   }
 
   const hasVariants = Array.isArray(variants) && variants.length > 0;
   
   // Validation
-  if (!hasVariants && price === undefined) {
-    return res.status(400).json({ error: 'price is required for items without variants' });
-  }
+  const problem = checkItemFields(req.body, hasVariants);
+  if (problem) return res.status(400).json({ error: problem });
 
   if (hasVariants) {
     for (const v of variants) {
@@ -90,7 +115,7 @@ router.post('/', (req, res) => {
 
       const result = db.prepare(
         'INSERT INTO menu_items (name, category, price, image_url, has_variants, description) VALUES (?, ?, ?, ?, ?, ?)'
-      ).run(name, category, dbPrice, image_url || null, dbHasVariants, description || null);
+      ).run(clean(name, 80), clean(category, 40), dbPrice, image_url || null, dbHasVariants, description || null);
       
       const itemId = result.lastInsertRowid;
       
@@ -108,6 +133,8 @@ router.post('/', (req, res) => {
 
     // Fetch newly created item
     const newItem = db.prepare('SELECT * FROM menu_items WHERE id = ?').get(newItemId);
+    // A Milk/Dahi size gets the recipe its name implies, so selling it moves stock.
+    ensureRecipeForItem(newItem);
     if (newItem.has_variants) {
       newItem.variants = db.prepare('SELECT id, label, price, sort_order FROM item_variants WHERE menu_item_id = ? ORDER BY sort_order').all(newItemId);
     } else {
@@ -123,18 +150,20 @@ router.post('/', (req, res) => {
 
 // Update item
 router.put('/:id', (req, res) => {
-  const { name, category, price, image_url, variants, description } = req.body;
+  const { name, category, price, image_url, variants, description } = req.body || {};
   const { id } = req.params;
-  
+
+  if (!db.prepare('SELECT 1 FROM menu_items WHERE id = ?').get(id)) {
+    return res.status(404).json({ error: 'That menu item no longer exists. Refresh the menu and try again.' });
+  }
   if (!name || !category) {
-    return res.status(400).json({ error: 'name and category are required' });
+    return res.status(400).json({ error: 'Enter a name and choose a category for this item.' });
   }
 
   const hasVariants = Array.isArray(variants) && variants.length > 0;
-  
-  if (!hasVariants && price === undefined) {
-    return res.status(400).json({ error: 'price is required for items without variants' });
-  }
+
+  const problem = checkItemFields(req.body, hasVariants, Number(id));
+  if (problem) return res.status(400).json({ error: problem });
 
   if (hasVariants) {
     for (const v of variants) {
@@ -155,7 +184,7 @@ router.put('/:id', (req, res) => {
 
       db.prepare(
         'UPDATE menu_items SET name = ?, category = ?, price = ?, image_url = ?, has_variants = ?, description = ? WHERE id = ?'
-      ).run(name, category, dbPrice, image_url || null, dbHasVariants, description || null, id);
+      ).run(clean(name, 80), clean(category, 40), dbPrice, image_url || null, dbHasVariants, description || null, id);
       
       // Delete existing variants
       db.prepare('DELETE FROM item_variants WHERE menu_item_id = ?').run(id);
@@ -174,6 +203,7 @@ router.put('/:id', (req, res) => {
     // If this was the "1 Litre" or "Dahi" universal-price item, every other
     // sized item in that category is re-priced off it — see db/menu-pricing.js.
     cascadeUniversalPricing(updatedItem);
+    ensureRecipeForItem(updatedItem);
     if (updatedItem.has_variants) {
       updatedItem.variants = db.prepare('SELECT id, label, price, sort_order FROM item_variants WHERE menu_item_id = ? ORDER BY sort_order').all(id);
     } else {

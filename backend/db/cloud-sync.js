@@ -21,6 +21,7 @@ const db = require('./database');
 const { getCustomerSummary } = require('./customer-summary');
 const { buildOrderSyncPayload } = require('./order-sync-payload');
 const { getDeviceId } = require('./activation-config');
+const identity = require('./cloud-identity');
 
 /**
  * Cloud ingest table per local table. Not every local table has a cloud
@@ -46,24 +47,108 @@ const INGEST_TABLE = {
   inventory_entries: 'inventory_entries',
 };
 
-/** Splits a push into batches under ingest.js's MAX_ROWS (200). */
-function pushBatches(config, cloudTable, rows, label) {
-  const CHUNK = 200;
-  for (let i = 0; i < rows.length; i += CHUNK) {
-    const chunk = rows.slice(i, i + CHUNK);
-    postJson(config.cloudUrl, '/api/ingest/batch', config.apiKey, {
-      table: cloudTable,
-      rows: chunk,
-      // Which till this is — see cloud/db/schema.js's migration note and
-      // cloud/routes/ingest.js's buildUpsert for why (branch_id, local_id)
-      // alone stopped being a safe key once a branch can have more than one
-      // till. Reuses the same stable per-install id activation already
-      // relies on (db/activation-config.js) rather than minting a second one.
-      device_id: getDeviceId(),
-    }).catch((err) => {
-      console.error(`[Cloud] sync ${label} failed:`, err.message);
-    });
+const ingredientName = db.prepare('SELECT name FROM ingredients WHERE id = ?');
+
+/**
+ * A stock movement points at its ingredient by this till's own row number,
+ * which means nothing to the cloud: it merges ingredients by name (see
+ * cloud/routes/ingest.js's ingestIngredients), so the cloud's "Yogurt" can be
+ * number 3 while this till's is 2. Every movement pushed with only the number
+ * then pointed at an ingredient the cloud does not have under that number, and
+ * dropped out of every report that joins the two. Sending the name along is
+ * what lets the cloud file each movement under the right ingredient.
+ */
+function withIngredientName(cloudTable, rows) {
+  if (cloudTable !== 'inventory_entries') return rows;
+  return rows.map((r) => {
+    const found = r && ingredientName.get(r.ingredient_id);
+    return found ? { ...r, ingredient_name: found.name } : r;
+  });
+}
+
+/**
+ * Files each row under the (device, number) the cloud knows it by.
+ *
+ * A row this device made itself is filed under this device and its own number,
+ * as it always was. A row that was *restored* from the cloud (see
+ * db/cloud-identity.js) is filed under the till it originally came from and
+ * that till's number for it — so pushing it again updates the cloud's existing
+ * row instead of adding a second copy beside it — and the numbers it refers to
+ * (its shift, its line items, its customer) are translated the same way.
+ *
+ * Returns Map<deviceId, rows[]>.
+ */
+function groupByCloudIdentity(cloudTable, rows) {
+  const myDevice = getDeviceId();
+  const groups = new Map();
+  for (const row of rows) {
+    if (!row) continue;
+    const own = identity.lookup(cloudTable, row.id);
+    const device = own ? own.device_id : myDevice;
+    let out = own ? { ...row, id: own.orig_id } : row;
+
+    if (own && ['orders', 'expenses'].includes(cloudTable) && out.shift_id != null) {
+      const shift = identity.lookup('shifts', out.shift_id);
+      if (shift && shift.device_id === device) out = { ...out, shift_id: shift.orig_id };
+    }
+    if (own && cloudTable === 'orders' && Array.isArray(out.items)) {
+      out = { ...out, items: out.items.map((it) => {
+        const item = identity.lookup('order_items', it.id);
+        return item ? { ...it, id: item.orig_id } : it;
+      }) };
+    }
+    // A payment recorded here for a customer restored from elsewhere refers to
+    // that customer by the number the cloud knows them by.
+    if (cloudTable === 'credit_payments' && out.customer_id != null) {
+      const customer = identity.lookup('customers', out.customer_id);
+      if (customer) out = { ...out, customer_id: customer.orig_id };
+    }
+
+    if (!groups.has(device)) groups.set(device, []);
+    groups.get(device).push(out);
   }
+  return groups;
+}
+
+/**
+ * Posts rows to the cloud in batches under ingest.js's MAX_ROWS (200), one
+ * device's rows at a time. Resolves to the outcome of every request, so a
+ * caller that needs to know whether it all landed can check; one that does not
+ * (every push below) just logs failures and moves on.
+ */
+function postGrouped(config, cloudTable, rows) {
+  const CHUNK = 200;
+  const requests = [];
+  let groups;
+  try {
+    groups = groupByCloudIdentity(cloudTable, withIngredientName(cloudTable, rows));
+  } catch (err) {
+    // Preparing a push must never throw into the sale, payment or shift that caused it.
+    return Promise.resolve([{ status: 'rejected', reason: err }]);
+  }
+  for (const [deviceId, deviceRows] of groups) {
+    for (let i = 0; i < deviceRows.length; i += CHUNK) {
+      requests.push(postJson(config.cloudUrl, '/api/ingest/batch', config.apiKey, {
+        table: cloudTable,
+        rows: deviceRows.slice(i, i + CHUNK),
+        // Which till this is — see cloud/db/schema.js's migration note and
+        // cloud/routes/ingest.js's buildUpsert for why (branch_id, local_id)
+        // alone stopped being a safe key once a branch can have more than one
+        // till. For rows this device made, that is the same stable per-install
+        // id activation already relies on (db/activation-config.js).
+        device_id: deviceId,
+      }));
+    }
+  }
+  return Promise.allSettled(requests);
+}
+
+function pushBatches(config, cloudTable, rows, label) {
+  postGrouped(config, cloudTable, rows).then((outcomes) => {
+    outcomes.filter((o) => o.status === 'rejected').forEach((o) => {
+      console.error(`[Cloud] sync ${label} failed:`, o.reason && o.reason.message);
+    });
+  });
 }
 
 /** Push one row. See module doc — a no-op if `localTable` has no cloud table, or the till isn't paired. */
@@ -113,6 +198,10 @@ function syncDelete(localTable) {
  * a whole tombstone mechanism for them too.
  */
 function syncStaffDelete(localId) {
+  // Looked up and forgotten first, even when unpaired: staff numbers are handed out
+  // as MAX+1, so a deleted row's number can be reused and must not inherit its identity.
+  const own = identity.lookup('staff', localId);
+  identity.forget('staff', localId);
   const config = readCloudConfig();
   if (!config) return;
   // device_id as a query param, not a body — DELETE requests carry no body
@@ -120,19 +209,23 @@ function syncStaffDelete(localId) {
   // match *any* till's staff row of this same local_id once a branch can
   // have more than one — see cloud/routes/staff.js's own note on why that
   // used to be safe and now genuinely is not.
-  deleteJson(config.cloudUrl, `/api/staff/local/${localId}?device_id=${encodeURIComponent(getDeviceId())}`, config.apiKey).catch((err) => {
+  deleteJson(config.cloudUrl, `/api/staff/local/${own ? own.orig_id : localId}?device_id=${encodeURIComponent(own ? own.device_id : getDeviceId())}`, config.apiKey).catch((err) => {
     console.error('[Cloud] sync staff delete failed:', err.message);
   });
+
 }
 
 /** Same as syncStaffDelete, for an expense — see cloud/routes/expenses.js's
  * DELETE /local/:localId, the only thing this calls. */
 function syncExpenseDelete(localId) {
+  const own = identity.lookup('expenses', localId);
+  identity.forget('expenses', localId);
   const config = readCloudConfig();
   if (!config) return;
-  deleteJson(config.cloudUrl, `/api/expenses/local/${localId}?device_id=${encodeURIComponent(getDeviceId())}`, config.apiKey).catch((err) => {
+  deleteJson(config.cloudUrl, `/api/expenses/local/${own ? own.orig_id : localId}?device_id=${encodeURIComponent(own ? own.device_id : getDeviceId())}`, config.apiKey).catch((err) => {
     console.error('[Cloud] sync expense delete failed:', err.message);
   });
+
 }
 
 /**
@@ -193,7 +286,10 @@ function pushInitialBackfill() {
   const customers = customerIds.map(getCustomerSummary).filter(Boolean);
   pushBatches(config, 'customers', customers, 'customers (initial backfill)');
 
-  const creditPayments = db.prepare('SELECT * FROM credit_payments ORDER BY id').all();
+  // Not the placeholder payment a restore writes to make a balance come out
+  // right (routes/cloud.js): it stands for payments the cloud already has.
+  const creditPayments = db.prepare(
+    "SELECT * FROM credit_payments WHERE COALESCE(note, '') NOT LIKE 'Restored from cloud backup%' ORDER BY id").all();
   pushBatches(config, 'credit_payments', creditPayments, 'credit payments (initial backfill)');
 
   const inventoryEntries = db.prepare('SELECT * FROM inventory_entries ORDER BY id').all();
@@ -210,4 +306,23 @@ function pushInitialBackfill() {
   pushBatches(config, 'orders', orders, 'orders (initial backfill)');
 }
 
-module.exports = { syncUpsert, syncUpsertMany, syncDelete, syncStaffDelete, syncExpenseDelete, syncMenuUpsert, pushInitialBackfill };
+/**
+ * Re-sends every stock movement with its ingredient's name attached, and
+ * reports whether the cloud accepted all of it. Movements recorded before the
+ * name travelled with them are filed on the cloud under this till's own
+ * ingredient numbers, which is what made milk or yogurt sales go missing from
+ * the Summary table — re-pushing them lets the cloud file each one under the
+ * right ingredient (every push is an upsert, so this is safe to repeat).
+ * Awaited, unlike the fire-and-forget pushes above, because the caller only
+ * wants to remember it is done once it actually is.
+ */
+async function pushInventoryEntriesResync() {
+  const config = readCloudConfig();
+  if (!config) return false;
+  const outcomes = await postGrouped(config, 'inventory_entries', db.prepare('SELECT * FROM inventory_entries ORDER BY id').all());
+  const failed = outcomes.find((o) => o.status === 'rejected');
+  if (failed) throw failed.reason;
+  return true;
+}
+
+module.exports = { pushInventoryEntriesResync, syncUpsert, syncUpsertMany, syncDelete, syncStaffDelete, syncExpenseDelete, syncMenuUpsert, pushInitialBackfill };

@@ -745,7 +745,13 @@ export default function Reports({ onNavigate }) {
             {reportFormat === 'summary' ? (
               // Sales and stock movement together — see StockMovementTable's
               // own note on why these are one merged table rather than two.
-              <StockMovementTable salesByDay={salesByDay} stockMovement={stockMovement} formatMoney={formatMoney} loading={isLoading} />
+              <StockMovementTable
+                salesByDay={salesByDay}
+                stockMovement={stockMovement}
+                ingredientNames={kpi.ingredient_usage.map((i) => i.name)}
+                formatMoney={formatMoney}
+                loading={isLoading}
+              />
             ) : (
             <table className="w-full text-left border-collapse text-sm">
               <thead>
@@ -826,6 +832,18 @@ export default function Reports({ onNavigate }) {
                   </tr>
                 )}
               </tbody>
+              {reportFormat === 'detailed' && detailedReport.length > 0 && (
+                // Summed over every order in the range, not just the rows drawn
+                // above — the table is capped for speed, the total must not be.
+                <tfoot>
+                  <tr className="bg-gray-50 border-t-2 border-gray-300">
+                    <td colSpan={7} className="py-3 px-4 text-right text-xs font-bold uppercase tracking-wide text-gray-600">Total</td>
+                    <td className="py-3 px-4 text-right font-bold text-gray-900">
+                      {formatMoney(detailedReport.reduce((sum, r) => sum + (Number(r.total) || 0), 0))}
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
             </table>
             )}
             {reportFormat !== 'summary' && (reportFormat === 'items' ? lineItems.length : detailedReport.length) > TABLE_ROW_CAP && (
@@ -834,16 +852,6 @@ export default function Reports({ onNavigate }) {
                 {(reportFormat === 'items' ? lineItems.length : detailedReport.length).toLocaleString()} rows.
                 Use Export below for the complete list.
               </p>
-            )}
-            {onNavigate && reportFormat === 'summary' && (
-              <div className="flex justify-end mt-4 print:hidden">
-                <button
-                  onClick={() => onNavigate('summary-report')}
-                  className="px-4 py-2 rounded-lg text-sm font-semibold border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
-                >
-                  View Full Report
-                </button>
-              </div>
             )}
           </div>
 

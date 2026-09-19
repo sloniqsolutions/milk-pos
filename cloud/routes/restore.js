@@ -38,9 +38,9 @@ router.get('/full', requireBranch, async (req, res) => {
   const branchId = req.branch.id;
 
   try {
-    const [staff, customers, ingredients, shifts, expenses, orders, orderItems] = await Promise.all([
-      db.q('SELECT local_id, name, role, color, active, pin_hash FROM staff WHERE branch_id = ? ORDER BY local_id', [branchId]),
-      db.q(`SELECT local_id, name, phone, address, notes, active, order_count, total_spent,
+    const [staff, customers, ingredients, shifts, expenses, orders, orderItems, inventoryEntries] = await Promise.all([
+      db.q('SELECT local_id, device_id, name, role, color, active, pin_hash FROM staff WHERE branch_id = ? ORDER BY local_id', [branchId]),
+      db.q(`SELECT local_id, device_id, name, phone, address, notes, active, order_count, total_spent,
                    first_order_at, last_order_at, total_credited, total_paid, balance, total_litres
               FROM customers WHERE branch_id = ? ORDER BY local_id`, [branchId]),
       db.q('SELECT local_id, name, unit, stock, low_stock_threshold, cost_per_unit FROM ingredients WHERE branch_id = ? ORDER BY local_id', [branchId]),
@@ -66,6 +66,12 @@ router.get('/full', requireBranch, async (req, res) => {
               JOIN orders o ON o.id = oi.order_id
              WHERE oi.branch_id = ?
              ORDER BY oi.local_id`, [branchId]),
+      // Restocks, sales deductions, Convert-to-Yogurt and waste. The Reports
+      // KPI cards' Milk/Yogurt "used" figures and the Stock Movement table
+      // are read straight off these rows, not re-derived from orders — so a
+      // restore that brings orders back without them leaves both empty.
+      db.q(`SELECT local_id, device_id, ingredient_local_id, type, amount, entry_date, created_at, received_at
+              FROM inventory_entries WHERE branch_id = ? ORDER BY received_at ASC`, [branchId]),
     ]);
 
     res.json({
@@ -78,6 +84,7 @@ router.get('/full', requireBranch, async (req, res) => {
       expenses,
       orders,
       order_items: orderItems,
+      inventory_entries: inventoryEntries,
     });
   } catch (err) {
     console.error('Restore export failed:', err.message);

@@ -3,6 +3,10 @@ const router = express.Router();
 const db = require('../db/database');
 const { syncUpsert } = require('../db/cloud-sync');
 const { recordEntry } = require('../db/inventory-entries');
+const { clean, toNumber, checkEntryDay } = require('../db/validate');
+
+/** Largest single stock figure accepted — far beyond any real shop, small enough to catch a typo. */
+const MAX_AMOUNT = 10000000;
 
 const today = () => new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD, local time
 
@@ -19,10 +23,22 @@ router.get('/', (req, res) => {
 
 // POST new ingredient
 router.post('/', (req, res) => {
-  const { name, unit, stock, low_stock_threshold, date } = req.body;
+  const { stock, low_stock_threshold, date } = req.body || {};
+  const name = clean(req.body && req.body.name, 80);
+  const unit = clean(req.body && req.body.unit, 20);
   if (!name || !unit) {
-    return res.status(400).json({ error: 'Name and unit are required' });
+    return res.status(400).json({ error: 'Enter a name and a unit (for example Litre or grams) for this ingredient.' });
   }
+  const startStock = stock === undefined || stock === null || stock === '' ? 0 : toNumber(stock);
+  const startThreshold = low_stock_threshold === undefined || low_stock_threshold === null || low_stock_threshold === '' ? 0 : toNumber(low_stock_threshold);
+  if (!(startStock >= 0) || startStock > MAX_AMOUNT) {
+    return res.status(400).json({ error: 'The starting stock must be zero or more.' });
+  }
+  if (!(startThreshold >= 0) || startThreshold > MAX_AMOUNT) {
+    return res.status(400).json({ error: 'The low-stock level must be zero or more.' });
+  }
+  const dayProblem = checkEntryDay(date);
+  if (dayProblem) return res.status(400).json({ error: dayProblem });
 
   try {
     // Explicit id under 10000 — see backend/routes/staff.js's identical
@@ -32,8 +48,8 @@ router.post('/', (req, res) => {
     // would otherwise continue from that high-water mark instead of 1.
     const nextId = db.prepare('SELECT COALESCE(MAX(id), 0) + 1 AS id FROM ingredients WHERE id < 10000').get().id;
     const insert = db.prepare('INSERT INTO ingredients (id, name, unit, stock, low_stock_threshold) VALUES (?, ?, ?, ?, ?)');
-    const startingStock = stock || 0;
-    const result = insert.run(nextId, name, unit, startingStock, low_stock_threshold || 0);
+    const startingStock = startStock;
+    const result = insert.run(nextId, name, unit, startingStock, startThreshold);
     if (startingStock > 0) {
       recordEntry(result.lastInsertRowid, 'stock', startingStock, date || today());
     }
@@ -43,7 +59,7 @@ router.post('/', (req, res) => {
   } catch (error) {
     console.error('Error adding ingredient:', error);
     if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-      return res.status(400).json({ error: 'Ingredient with this name already exists' });
+      return res.status(409).json({ error: `An ingredient called "${name}" already exists. Edit that one instead.` });
     }
     res.status(500).json({ error: 'Failed to add ingredient' });
   }
@@ -53,24 +69,41 @@ router.post('/', (req, res) => {
 // For a robust system we can allow { action: 'add', amount: 50 } or { stock: 50 }
 router.put('/:id/stock', (req, res) => {
   const { id } = req.params;
-  const { action, amount, stock, date } = req.body;
+  const { action, amount, stock, date } = req.body || {};
 
   try {
     const ingredient = db.prepare('SELECT * FROM ingredients WHERE id = ?').get(id);
     if (!ingredient) {
-      return res.status(404).json({ error: 'Ingredient not found' });
+      return res.status(404).json({ error: 'That ingredient no longer exists. Refresh the page and try again.' });
     }
+    const dayProblem = checkEntryDay(date);
+    if (dayProblem) return res.status(400).json({ error: dayProblem });
 
     let newStock = ingredient.stock;
-    if (action === 'add') {
-      newStock += parseFloat(amount);
-    } else if (action === 'subtract') {
-      // Clamp at 0 — stock cannot go negative from a manual adjustment either.
-      newStock = Math.max(0, newStock - parseFloat(amount));
+    if (action === 'add' || action === 'subtract') {
+      const delta = toNumber(amount);
+      if (!(delta > 0) || delta > MAX_AMOUNT) {
+        return res.status(400).json({ error: 'Enter an amount greater than zero.' });
+      }
+      if (action === 'add') {
+        newStock += delta;
+      } else if (delta > ingredient.stock) {
+        // Stock can't go below zero. Refused, not silently clamped: a clamp
+        // would record a smaller movement than the person typed and hide the mistake.
+        return res.status(400).json({
+          error: `You can't remove ${delta} ${ingredient.unit} — only ${ingredient.stock} ${ingredient.unit} of ${ingredient.name} is in stock.`,
+          code: 'INSUFFICIENT_STOCK',
+        });
+      } else {
+        newStock -= delta;
+      }
     } else if (stock !== undefined) {
-      newStock = parseFloat(stock);
+      newStock = toNumber(stock);
+      if (!(newStock >= 0) || newStock > MAX_AMOUNT) {
+        return res.status(400).json({ error: 'Stock must be zero or more.' });
+      }
     } else {
-      return res.status(400).json({ error: 'Invalid stock update request' });
+      return res.status(400).json({ error: 'Choose whether to add stock, remove stock, or set the count.' });
     }
 
     const update = db.prepare('UPDATE ingredients SET stock = ? WHERE id = ?');
@@ -95,10 +128,11 @@ router.put('/:id/stock', (req, res) => {
 // PUT update threshold
 router.put('/:id/threshold', (req, res) => {
   const { id } = req.params;
-  const { threshold } = req.body;
+  const { threshold: rawThreshold } = req.body || {};
+  const threshold = toNumber(rawThreshold);
 
-  if (threshold === undefined) {
-    return res.status(400).json({ error: 'Threshold is required' });
+  if (!(threshold >= 0) || threshold > MAX_AMOUNT) {
+    return res.status(400).json({ error: 'The low-stock level must be zero or more.' });
   }
 
   try {
@@ -153,13 +187,15 @@ router.get('/history', (req, res) => {
 // POST convert Milk stock into Yogurt stock — two entries recorded together
 // (milk out, yogurt in) so the conversion shows as one event in history.
 router.post('/convert-to-yogurt', (req, res) => {
-  const { milk_amount, yogurt_amount, date } = req.body;
-  const milkAmount = parseFloat(milk_amount);
-  const yogurtAmount = parseFloat(yogurt_amount);
+  const { milk_amount, yogurt_amount, date } = req.body || {};
+  const milkAmount = toNumber(milk_amount);
+  const yogurtAmount = toNumber(yogurt_amount);
 
-  if (!(milkAmount > 0) || !(yogurtAmount > 0)) {
+  if (!(milkAmount > 0) || !(yogurtAmount > 0) || milkAmount > MAX_AMOUNT || yogurtAmount > MAX_AMOUNT) {
     return res.status(400).json({ error: 'Enter how much milk is used and how much yogurt is being added.' });
   }
+  const dayProblem = checkEntryDay(date);
+  if (dayProblem) return res.status(400).json({ error: dayProblem });
 
   try {
     const milk = db.prepare("SELECT * FROM ingredients WHERE name = 'Milk'").get();
@@ -168,7 +204,7 @@ router.post('/convert-to-yogurt', (req, res) => {
       return res.status(500).json({ error: 'Milk or Yogurt ingredient is missing from inventory.' });
     }
     if (milk.stock < milkAmount) {
-      return res.status(400).json({ error: 'Not enough milk in stock.', code: 'INSUFFICIENT_MILK' });
+      return res.status(400).json({ error: `Not enough milk in stock: ${milk.stock} ${milk.unit} available, ${milkAmount} needed.`, code: 'INSUFFICIENT_MILK' });
     }
 
     const entryDate = date || today();
@@ -199,12 +235,14 @@ router.post('/convert-to-yogurt', (req, res) => {
 // POST report waste — subtracts stock like a normal adjustment, but recorded
 // with type 'waste' so it stays out of the restock/conversion history views.
 router.post('/waste', (req, res) => {
-  const { ingredient_id, amount, date } = req.body;
-  const wasteAmount = parseFloat(amount);
+  const { ingredient_id, amount, date } = req.body || {};
+  const wasteAmount = toNumber(amount);
 
-  if (!ingredient_id || !(wasteAmount > 0)) {
+  if (!ingredient_id || !(wasteAmount > 0) || wasteAmount > MAX_AMOUNT) {
     return res.status(400).json({ error: 'Choose an ingredient and enter an amount.' });
   }
+  const dayProblem = checkEntryDay(date);
+  if (dayProblem) return res.status(400).json({ error: dayProblem });
 
   try {
     const ingredient = db.prepare('SELECT * FROM ingredients WHERE id = ?').get(ingredient_id);
@@ -212,10 +250,16 @@ router.post('/waste', (req, res) => {
       return res.status(404).json({ error: 'Ingredient not found' });
     }
 
-    // Clamp at 0, same as a manual "subtract" adjustment — recorded amount
-    // reflects what actually left the stock.
-    const newStock = Math.max(0, ingredient.stock - wasteAmount);
-    const actualWaste = ingredient.stock - newStock;
+    // Waste can't exceed what is in stock: recording more than exists would
+    // put the balance below zero (or, clamped, hide the typo).
+    if (wasteAmount > ingredient.stock) {
+      return res.status(400).json({
+        error: `You can't record ${wasteAmount} ${ingredient.unit} of waste — only ${ingredient.stock} ${ingredient.unit} of ${ingredient.name} is in stock.`,
+        code: 'INSUFFICIENT_STOCK',
+      });
+    }
+    const newStock = ingredient.stock - wasteAmount;
+    const actualWaste = wasteAmount;
     const entryDate = date || today();
 
     const reportWaste = db.transaction(() => {

@@ -36,6 +36,7 @@ export default function SummaryReportScreen({ onNavigate }) {
   const [customTo, setCustomTo] = useState('');
   const [salesByDay, setSalesByDay] = useState([]);
   const [stockMovement, setStockMovement] = useState([]);
+  const [ingredientNames, setIngredientNames] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
 
@@ -64,9 +65,14 @@ export default function SummaryReportScreen({ onNavigate }) {
     Promise.all([
       reportsAPI.detailed({ from, to }),
       reportsAPI.stockMovement({ from, to }),
+      // Only for the full list of ingredient names, so every one keeps its
+      // column even on a range where it happened not to move.
+      reportsAPI.kpi({ from, to }),
     ])
-      .then(([detailed, movement]) => {
+      .then(([detailed, movement, kpiData]) => {
         if (cancelled) return;
+        setIngredientNames(Array.isArray(kpiData && kpiData.ingredient_usage)
+          ? kpiData.ingredient_usage.map((i) => i.name) : []);
         const byDate = {};
         (Array.isArray(detailed) ? detailed : []).forEach((row) => {
           const date = moment(row.created_at).format('YYYY-MM-DD');
@@ -147,7 +153,7 @@ export default function SummaryReportScreen({ onNavigate }) {
             <h2 className="text-lg font-bold text-gray-900">Sales &amp; Stock Movement</h2>
             <p className="text-sm text-gray-500">{from} to {to}</p>
           </div>
-          <StockMovementTable salesByDay={salesByDay} stockMovement={stockMovement} formatMoney={formatMoney} loading={loading} />
+          <StockMovementTable salesByDay={salesByDay} stockMovement={stockMovement} ingredientNames={ingredientNames} formatMoney={formatMoney} loading={loading} />
         </div>
       </div>
     </div>

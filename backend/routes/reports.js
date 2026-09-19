@@ -3,6 +3,26 @@ const router = express.Router();
 const db = require('../db/database');
 
 const { isAdminRole } = require('../middleware/auth');
+const { isRealDay, localDay } = require('../db/validate');
+
+/**
+ * Every report takes an optional from/to. An unreadable one (a typo, a
+ * half-typed custom range, a hand-built URL) used to reach date arithmetic and
+ * come back as a 500 reading "Invalid time value". It is answered here, once,
+ * for every report below, in words the person at the till can act on.
+ */
+router.use((req, res, next) => {
+  const { from, to } = req.query;
+  for (const [label, value] of [['start', from], ['end', to]]) {
+    if (value !== undefined && value !== '' && !isRealDay(String(value))) {
+      return res.status(400).json({ error: `The ${label} date isn't a valid date. Choose it from the calendar (YYYY-MM-DD).` });
+    }
+  }
+  if (from && to && String(from) > String(to)) {
+    return res.status(400).json({ error: 'The start date is after the end date. Swap them and try again.' });
+  }
+  next();
+});
 
 /**
  * Restrict a manager to their own takings.
@@ -33,7 +53,9 @@ function creditScope(req) {
 }
 
 function getDateRange(req) {
-  const today = new Date().toISOString().split('T')[0];
+  // The shop's own calendar day, not UTC's: between midnight and 5am local time
+  // UTC is still "yesterday", and the default range opened on the wrong day.
+  const today = localDay();
   const from = req.query.from || today;
   const to = req.query.to || today;
   return { from, to };

@@ -5,7 +5,6 @@ import MenuManagement from '@/pages/MenuManagement';
 import Cashier from '@/pages/Cashier';
 import Orders from '@/pages/Orders';
 import Reports from '@/pages/Reports';
-import SummaryReportScreen from '@/pages/SummaryReportScreen';
 import Settings from '@/pages/Settings';
 import InventoryScreen from '@/pages/InventoryScreen';
 import StockHistoryScreen from '@/pages/StockHistoryScreen';
@@ -24,7 +23,6 @@ const screens: Record<string, React.ComponentType<{ onNavigate?: (page: string) 
   cashier: Cashier,
   orders: Orders,
   reports: Reports,
-  'summary-report': SummaryReportScreen,
   settings: Settings,
   inventory: InventoryScreen,
   'stock-history': StockHistoryScreen,

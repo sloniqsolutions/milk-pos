@@ -6,6 +6,7 @@ const http = require('http');
 const { buildReceiptBuffer } = require('./escpos-receipt');
 const { printRawBuffer } = require('./print-raw-windows');
 const { initAutoUpdater } = require('./auto-update');
+const { resolveDataDir, migrateLegacyData } = require('./data-dir');
 
 let mainWindow;
 let backendProcess;
@@ -31,17 +32,18 @@ function log(msg) {
  * previous launch already wrote it, or someone rekeyed it by hand), it is
  * left alone rather than overwritten on every startup.
  *
- * Must be written beside server.js (backendDir) — that is the only place
- * backend/db/cloud-config.js ever looks, since POS_USER_DATA_PATH is never
- * set (see the comment in startBackend()). Writing it to
- * app.getPath('userData') (AppData/Roaming) put it somewhere the backend
- * never reads, which is why packaged installs never actually connected to
- * the cloud despite this function "succeeding".
+ * Written into the data folder (see data-dir.js), which is where
+ * backend/db/cloud-config.js looks — POS_USER_DATA_PATH when packaged, beside
+ * server.js in development.
  */
-function ensureCloudSyncConfig(backendDir) {
-  const configPath = path.join(backendDir, 'cloud-sync.json');
+function ensureCloudSyncConfig(dataDir) {
+  const configPath = path.join(dataDir, 'cloud-sync.json');
   if (fs.existsSync(configPath)) return;
 
+  // SECURITY: this key reads the whole branch (staff PIN hashes, orders) from the
+  // cloud, and it is committed in this file. While the repository is public it is
+  // public: rotate TILL_API_KEY (cloud/.env) and make the repo private, publishing
+  // installers to a separate public releases repo — see RELEASING.md.
   const config = {
     enabled: true,
     cloud_url: 'https://milk-pos.virtiqosolutions.com',
@@ -128,36 +130,33 @@ if (!gotTheLock) {
     log('sqlite3.node exists: ' + fs.existsSync(sqlitePath));
     log('node_modules exists: ' + fs.existsSync(path.join(backendDir, 'node_modules')));
 
-    ensureCloudSyncConfig(backendDir);
-
     /*
-     * Where the database lives: beside server.js, wherever that actually is
-     * — backend/ in the repo during development, resources/backend/ inside a
-     * packaged install. Never AppData/Roaming.
+     * Where the database lives.
      *
-     * That used to be app.getPath('userData') in production, on the
-     * reasoning that a packaged install's own folder could be read-only and
-     * is wiped on reinstall. Neither holds here: the NSIS config installs
-     * per-user (`perMachine: false`), so the install directory is already
-     * writable without admin rights, and electron-builder's NSIS target does
-     * not delete files it did not package on an update — pos_database.db is
-     * explicitly excluded from what gets packaged (see package.json's
-     * extraResources filter), so it is never touched by an install/update
-     * either way.
-     *
-     * What using two different locations actually cost: `electron:dev` and
-     * plain `npm start`/`npm run dev` in backend/ silently read DIFFERENT
-     * databases — one at AppData\Roaming\pure-milk-pos, the other at
-     * backend/pos_database.db — and both could pair to the same cloud branch
-     * independently, each push overwriting the other's rows sharing a local
-     * id. Never setting POS_USER_DATA_PATH here makes backend/db/database.js
-     * fall back to its own repo-relative default everywhere, so there is
-     * only ever one database, however the app is launched or packaged.
+     * Packaged: Electron's per-user data folder (data-dir.js). NOT the install
+     * folder — the NSIS updater deletes the install folder on every update,
+     * database and all. Development: beside server.js, i.e. backend/ in the repo,
+     * so `electron:dev` and `npm start` in backend/ still share one database.
      */
+    const dataDir = resolveDataDir({ isPackaged: app.isPackaged, userDataPath: app.getPath('userData') });
+    const dataDirForFiles = dataDir || backendDir;
+    if (dataDir) {
+      try {
+        fs.mkdirSync(dataDir, { recursive: true });
+        migrateLegacyData(backendDir, dataDir, log);
+      } catch (err) {
+        log('[Data] Could not prepare the data folder: ' + err.message);
+      }
+    }
+    log('Data folder: ' + dataDirForFiles);
+
+    ensureCloudSyncConfig(dataDirForFiles);
+
     const env = {
       ...process.env,
       ELECTRON_RUN_AS_NODE: '1',
       PORT: '3001',
+      ...(dataDir ? { POS_USER_DATA_PATH: dataDir } : {}),
     };
 
     try {

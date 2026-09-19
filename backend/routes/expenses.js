@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/database');
 const { syncUpsert, syncExpenseDelete } = require('../db/cloud-sync');
+const { clean, toNumber, localDay } = require('../db/validate');
 
 /**
  * Petty cash paid out — rider fuel, staff lunch, a repair, and so on.
@@ -41,7 +42,9 @@ router.get('/categories', (req, res) => res.json(CATEGORIES));
  * count impossible to reconcile.
  */
 router.get('/', (req, res) => {
-  const today = new Date().toISOString().split('T')[0];
+  // The shop's own calendar day, not UTC's — between midnight and 5am here UTC
+  // is still "yesterday", and the list opened on the wrong day.
+  const today = localDay();
   const from = req.query.from || today;
   const to = req.query.to || today;
   const category = req.query.category && String(req.query.category).trim();
@@ -75,14 +78,18 @@ router.get('/', (req, res) => {
 
 // POST a new expense
 router.post('/', (req, res) => {
-  const { category, description, amount, from_drawer } = req.body;
+  const { description, amount, from_drawer } = req.body || {};
+  const category = clean(req.body && req.body.category, 60);
 
-  const value = Number(amount);
-  if (!category || !String(category).trim()) {
-    return res.status(400).json({ error: 'Choose what the money was spent on' });
+  const value = toNumber(amount);
+  if (!category) {
+    return res.status(400).json({ error: 'Choose what the money was spent on.' });
   }
-  if (!Number.isFinite(value) || value <= 0) {
-    return res.status(400).json({ error: 'Enter an amount greater than zero' });
+  if (!(value > 0)) {
+    return res.status(400).json({ error: 'Enter an amount greater than zero.' });
+  }
+  if (value > 100000000 || Math.round(value * 100) === 0) {
+    return res.status(400).json({ error: 'That amount does not look right. Please check it and try again.' });
   }
 
   try {
@@ -117,8 +124,8 @@ router.post('/', (req, res) => {
       // Attribution comes from the session, never the request body.
       (req.user && req.user.staffId) || null,
       (req.user && req.user.name) || 'Unknown',
-      String(category).trim(),
-      description ? String(description).trim() : null,
+      category,
+      clean(description, 300) || null,
       Math.round(value * 100) / 100,
       fromDrawer
     );

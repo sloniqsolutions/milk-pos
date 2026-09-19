@@ -4,6 +4,11 @@ const db = require('../db/database');
 const bcrypt = require('bcryptjs');
 const { syncUpsert, syncStaffDelete } = require('../db/cloud-sync');
 const saltRounds = 10;
+const { clean } = require('../db/validate');
+
+/** PINs are numeric — the sign-in screen is a number pad — and 4 to 8 digits long. */
+const isValidPin = (pin) => /^\d{4,8}$/.test(String(pin));
+const PIN_MESSAGE = 'The PIN must be 4 to 8 digits, numbers only.';
 const {
   createSession, destroySession, requireAdmin, requireAuth, isAdminRole, getSession,
 } = require('../middleware/auth');
@@ -90,10 +95,16 @@ router.get('/', requireAdmin, (req, res) => {
 
 // POST new staff
 router.post('/', requireAdmin, async (req, res) => {
-  const { name, role, pin, color } = req.body;
-  if (!name || !pin) return res.status(400).json({ error: 'Name and PIN required' });
+  const { role, pin, color } = req.body || {};
+  const name = clean(req.body && req.body.name, 60);
+  if (!name || !pin) return res.status(400).json({ error: 'Enter a name and a PIN for the new staff member.' });
+  if (!isValidPin(pin)) return res.status(400).json({ error: PIN_MESSAGE });
   if (role !== undefined && !ASSIGNABLE_ROLES.includes(role)) {
     return res.status(400).json({ error: `Role must be one of: ${ASSIGNABLE_ROLES.join(', ')}` });
+  }
+  const sameName = db.prepare('SELECT id FROM staff WHERE LOWER(name) = LOWER(?)').get(name);
+  if (sameName) {
+    return res.status(409).json({ error: `There is already a staff member called "${name}". Use a different name so their sales are not confused.` });
   }
 
   try {
@@ -132,10 +143,17 @@ router.post('/', requireAdmin, async (req, res) => {
 
 // PUT update staff (toggle active, update role, etc)
 router.put('/:id', requireAdmin, async (req, res) => {
-  const { active, role, pin, name, color } = req.body;
+  const { active, role, pin, color } = req.body || {};
+  const name = req.body && req.body.name !== undefined ? clean(req.body.name, 60) : undefined;
   try {
     const target = db.prepare('SELECT id, role, active FROM staff WHERE id = ?').get(req.params.id);
-    if (!target) return res.status(404).json({ error: 'Staff member not found' });
+    if (!target) return res.status(404).json({ error: 'That staff member no longer exists. Refresh the page and try again.' });
+    if (name !== undefined) {
+      if (!name) return res.status(400).json({ error: 'The name cannot be empty.' });
+      const clash = db.prepare('SELECT id FROM staff WHERE LOWER(name) = LOWER(?) AND id != ?').get(name, target.id);
+      if (clash) return res.status(409).json({ error: `There is already a staff member called "${name}".` });
+    }
+    if (pin && !isValidPin(pin)) return res.status(400).json({ error: PIN_MESSAGE });
 
     // Deactivating or demoting the last administrator would lock the shop out
     // of Settings, staff and backups with no way back in.
@@ -280,10 +298,13 @@ function lockedResponse(res, status) {
  * the constraint happily accepts.
  */
 router.post('/login', async (req, res) => {
-  const { pin, staff_id } = req.body;
+  const { pin, staff_id } = req.body || {};
 
-  if (!pin) return res.status(400).json({ error: 'PIN required' });
-  if (staff_id === undefined || staff_id === null || staff_id === '') {
+  if (!pin || (typeof pin !== 'string' && typeof pin !== 'number')) {
+    return res.status(400).json({ error: 'Enter your PIN.' });
+  }
+  if (staff_id === undefined || staff_id === null || staff_id === ''
+      || !Number.isInteger(Number(staff_id))) {
     return res.status(400).json({ error: 'Select an account to sign in.' });
   }
 
@@ -325,7 +346,7 @@ router.post('/login', async (req, res) => {
  * their own figures on the reports screen, which is scoped to them.
  */
 router.get('/performance', requireAdmin, (req, res) => {
-  const today = new Date().toISOString().split('T')[0];
+  const today = new Date().toLocaleDateString('en-CA');
   const from = req.query.from || today;
   const to = req.query.to || today;
 

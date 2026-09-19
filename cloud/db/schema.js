@@ -864,6 +864,31 @@ CREATE TABLE IF NOT EXISTS product_keys (
 );
 CREATE INDEX IF NOT EXISTS product_keys_device
   ON product_keys (device_id) WHERE device_id IS NOT NULL;
+
+-- Self-heal: stock movements filed under an ingredient number the cloud does
+-- not have. Ingredients are merged by name here, so the cloud's "Yogurt" can be
+-- number 3 while a till's own is 2 — and every movement pushed before the till
+-- started sending the ingredient's name (see routes/ingest.js's
+-- ingestInventoryEntries) was filed under the till's number, pointing at
+-- nothing. Reports join movements to ingredients, so those rows silently
+-- vanished: milk or yogurt sold, and missing from the Summary table.
+--
+-- A fresh install always seeds Milk as 1 and Yogurt as 2 (backend/db/database.js),
+-- which is the only numbering a till this old could have used, so an orphaned
+-- 1 or 2 is re-pointed at the branch's Milk or Yogurt. Rows whose number does
+-- match an ingredient are never touched, and re-running this changes nothing.
+UPDATE inventory_entries ie
+   SET ingredient_local_id = fix.canonical
+  FROM (
+    SELECT e.id AS entry_id, i.local_id AS canonical
+      FROM inventory_entries e
+      JOIN (VALUES (1, 'Milk'), (2, 'Yogurt')) AS seed(num, name) ON seed.num = e.ingredient_local_id
+      JOIN ingredients i ON i.branch_id = e.branch_id AND i.name = seed.name
+     WHERE NOT EXISTS (
+       SELECT 1 FROM ingredients x
+        WHERE x.branch_id = e.branch_id AND x.local_id = e.ingredient_local_id)
+  ) fix
+ WHERE ie.id = fix.entry_id;
 `;
 
 /**

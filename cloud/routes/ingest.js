@@ -305,6 +305,32 @@ async function ingestIngredients(client, branchId, rows, receivedAt /* , deviceI
   await dropDeletedIngredients(client, branchId);
 }
 
+/**
+ * Stock movements. A movement names its ingredient by the pushing till's own
+ * row number, which is not the number the cloud files that ingredient under —
+ * ingredients are merged by name (see ingestIngredients above), so the cloud's
+ * "Yogurt" can be 3 while a till's own is 2. Filing the movement under the
+ * till's number left it pointing at no ingredient here, and every report that
+ * joins the two silently dropped it: milk or yogurt sold, and not in the
+ * table. The till now sends `ingredient_name` along with each movement (see
+ * backend/db/cloud-sync.js); it is resolved to this branch's own number here.
+ * A till too old to send the name falls back to the number it always sent.
+ */
+async function ingestInventoryEntries(client, branchId, rows, receivedAt, deviceId) {
+  const existing = await client.query(
+    'SELECT local_id, name FROM ingredients WHERE branch_id = $1', [branchId]);
+  const idByName = new Map(existing.rows.map(r => [String(r.name), Number(r.local_id)]));
+  const resolved = rows.map((r) => {
+    const canonical = r.ingredient_name != null ? idByName.get(String(r.ingredient_name)) : undefined;
+    return canonical != null ? { ...r, ingredient_id: canonical } : r;
+  });
+  const { sql, params } = buildUpsert(
+    'inventory_entries', INVENTORY_ENTRY_COLS, resolved,
+    r => [num(r.ingredient_id), str(r.type), num(r.amount), str(r.entry_date), str(r.created_at)],
+    receivedAt, branchId, deviceId);
+  await client.query(sql, params);
+}
+
 const HANDLERS = {
   orders: ingestOrders,
 
@@ -371,9 +397,7 @@ const HANDLERS = {
   // Restocks, Convert-to-Yogurt, waste — see db/schema.js's inventory_entries
   // table. Immutable once recorded (no edit/delete route touches one after
   // the fact), so a plain upsert is enough.
-  inventory_entries: simpleIngest('inventory_entries', INVENTORY_ENTRY_COLS, r => [
-    num(r.ingredient_id), str(r.type), num(r.amount), str(r.entry_date), str(r.created_at),
-  ]),
+  inventory_entries: ingestInventoryEntries,
 };
 
 /**
@@ -388,7 +412,7 @@ router.post('/batch', requireBranch, async (req, res) => {
   // read as 'legacy' rather than left blank — see db/schema.js's migration
   // note on why every row needs a real, non-NULL value here.
   const deviceId = str(req.body && req.body.device_id) || 'legacy';
-  const handler = HANDLERS[table];
+  const handler = typeof table === 'string' && Object.prototype.hasOwnProperty.call(HANDLERS, table) ? HANDLERS[table] : null;
 
   if (!handler) {
     return res.status(400).json({ error: `Unknown table "${table}"` });
@@ -401,6 +425,11 @@ router.post('/batch', requireBranch, async (req, res) => {
   }
   if (rows.length === 0) {
     return res.json({ ok: true, accepted: 0 });
+  }
+  // A row with no usable identifier would be stored under NULL and could never
+  // be updated again; refuse the batch with a reason instead of a database error.
+  if (rows.some(r => !r || typeof r !== 'object' || num(r.id) == null)) {
+    return res.status(400).json({ error: 'Every row in a batch needs its own id. Nothing in this batch was stored.' });
   }
 
   try {

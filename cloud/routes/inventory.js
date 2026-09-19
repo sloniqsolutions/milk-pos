@@ -182,13 +182,14 @@ router.get('/snapshot', requireBranch, async (req, res) => {
         `SELECT local_id, name, unit, low_stock_threshold, cost_per_unit, origin
            FROM ingredients WHERE branch_id = ? ORDER BY local_id`,
         [req.branch.id]),
-      db.q('SELECT local_id FROM ingredient_deletions WHERE branch_id = ?', [req.branch.id]),
+      db.q('SELECT local_id, name FROM ingredient_deletions WHERE branch_id = ?', [req.branch.id]),
     ]);
     res.json({
       version: version ? Number(version.version) : 0,
       branch_id: req.branch.id,
       ingredients,
       deleted: deleted.map(d => Number(d.local_id)),
+      deleted_rows: deleted.map(d => ({ local_id: Number(d.local_id), name: d.name })),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

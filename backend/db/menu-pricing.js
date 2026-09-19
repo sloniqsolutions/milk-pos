@@ -164,7 +164,49 @@ function derivedPriceFor(category, name) {
   return null;
 }
 
+/**
+ * Gives a Milk or Dahi item the recipe its name implies, if it has none.
+ *
+ * A recipe is what makes a sale deduct stock — and log the stock movement the
+ * Reports Summary table and KPI cards are built from. An item that reached
+ * this till without one (pulled down from the dashboard, or typed in at the
+ * Menu screen: only the standard sizes ever got one) sold happily and moved
+ * nothing: revenue showed, but the litres or grams never appeared anywhere.
+ *
+ * Only ever adds; a recipe someone already set up is left exactly as it is.
+ * "1.5 Litre" consumes 1.5 of Milk; "250g" or "0.5 KG" of Dahi consumes that
+ * many grams of Yogurt (the Yogurt ingredient is counted in grams — see
+ * db/database.js's Dahi migration).
+ */
+function ensureRecipeForItem(item) {
+  if (!item || !item.id) return false;
+  if (db.prepare('SELECT 1 FROM recipes WHERE menu_item_id = ? LIMIT 1').get(item.id)) return false;
+
+  let ingredientName = null;
+  let quantity = null;
+  if (item.category === 'Milk') {
+    const litres = parseMilkLitres(item.name);
+    if (litres != null && litres > 0) { ingredientName = 'Milk'; quantity = litres; }
+  } else if (item.category === 'Dahi') {
+    const factor = parseDahiFactor(item.name);
+    if (factor != null && factor > 0) { ingredientName = 'Yogurt'; quantity = Math.round(factor * 1000 * 1000) / 1000; }
+  }
+  if (!ingredientName) return false;
+
+  const ingredient = db.prepare('SELECT id FROM ingredients WHERE name = ?').get(ingredientName);
+  if (!ingredient) return false;
+  ensureRecipe(item.id, ingredient.id, quantity);
+  return true;
+}
+
+/** Runs ensureRecipeForItem over every active Milk/Dahi item; returns how many it fixed. */
+function backfillMissingRecipes() {
+  const items = db.prepare("SELECT id, name, category FROM menu_items WHERE active = 1 AND category IN ('Milk', 'Dahi')").all();
+  return items.reduce((fixed, item) => fixed + (ensureRecipeForItem(item) ? 1 : 0), 0);
+}
+
 module.exports = {
+  ensureRecipeForItem, backfillMissingRecipes,
   cascadeUniversalPricing, derivedPriceFor,
   parseMilkLitres, parseDahiFactor, isMilkUniversal, isDahiUniversal, findUniversal,
 };

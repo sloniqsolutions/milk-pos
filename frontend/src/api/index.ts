@@ -67,7 +67,9 @@ async function request<T = unknown>(method: string, path: string, body: unknown 
     // 401 means the token is gone or expired: sign out rather than leaving the
     // user on a screen where nothing works. 403 is a live session without the
     // rights for this action, which is a message, not a sign-out.
-    if (response.status === 401) {
+    // A wrong PIN on a confirm-your-PIN prompt is also a 401, but the session
+    // is fine — see backend/routes/cloud.js's restore-from-cloud.
+    if (response.status === 401 && error.code !== 'INVALID_PIN') {
       setAuthToken(null);
       if (onUnauthorized) onUnauthorized();
     }

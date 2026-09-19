@@ -26,8 +26,37 @@ router.get('/', (req, res) => {
 // PUT update multiple settings
 router.put('/', (req, res) => {
   const updates = req.body;
-  if (!updates || typeof updates !== 'object') {
-    return res.status(400).json({ error: 'Invalid payload' });
+  if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
+    return res.status(400).json({ error: 'Those settings could not be read. Please try again.' });
+  }
+  // Keys the app keeps its own state in (which cloud snapshot it has applied,
+  // which one-time migrations have run). Editing one by hand makes the till
+  // re-run or skip work, so they are not settable from here.
+  const INTERNAL_KEY = /^(migration_|cloud_|entries_name_resync|restore_)/;
+  for (const [key, value] of Object.entries(updates)) {
+    if (!/^[A-Za-z0-9_.-]{1,100}$/.test(key) || INTERNAL_KEY.test(key)) {
+      return res.status(400).json({ error: `"${key.slice(0, 40)}" is not a setting that can be changed here.` });
+    }
+    if (value !== null && value !== undefined && !['string', 'number', 'boolean'].includes(typeof value)) {
+      return res.status(400).json({ error: `The value for "${key}" is not valid.` });
+    }
+    if (String(value == null ? '' : value).length > 5000) {
+      return res.status(400).json({ error: `The value for "${key}" is too long.` });
+    }
+  }
+  // The figures every sale is priced from must be sensible numbers: a tax rate
+  // of "abc" or 4000 would otherwise be charged on the very next order.
+  const RANGES = {
+    tax_rate: [0, 100, 'The tax rate must be between 0 and 100 percent.'],
+    employee_discount_rate: [0, 100, 'The staff discount must be between 0 and 100 percent.'],
+    delivery_price: [0, 1000000, 'The delivery charge must be zero or more.'],
+  };
+  for (const [key, [min, max, message]] of Object.entries(RANGES)) {
+    if (updates[key] === undefined) continue;
+    const n = Number(updates[key]);
+    if (updates[key] === '' || updates[key] === null || !Number.isFinite(n) || n < min || n > max) {
+      return res.status(400).json({ error: message });
+    }
   }
 
   const upsert = db.prepare(`
