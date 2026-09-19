@@ -228,6 +228,9 @@ if (!gotTheLock) {
 
   function createWindow() {
     mainWindow = new BrowserWindow({
+      // The taskbar and window-corner icon (electron/icons/icon.ico, made from
+      // src/assets/cow-logo.png). The packaged .exe carries the same icon.
+      icon: path.join(__dirname, 'icons', 'icon.ico'),
       width: 1280,
       height: 800,
       minWidth: 1024,
