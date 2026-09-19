@@ -206,21 +206,45 @@ router.post('/', requireUser, async (req, res) => {
 router.delete('/local/:localId', requireBranch, async (req, res) => {
   const localId = Number(req.params.localId);
   if (!Number.isFinite(localId)) return res.status(400).json({ error: 'Bad staff id.' });
+  // See db/schema.js's migration note on staff_deletions — without this, a
+  // delete from one till could tombstone (and keep re-deleting) a different
+  // till's unrelated staff member who just happens to share a number.
+  const deviceId = (req.query.device_id && String(req.query.device_id)) || 'legacy';
 
   try {
     const version = await db.tx(async (client) => {
-      const person = await client.query(db.toPg(
-        'SELECT name FROM staff WHERE branch_id = ? AND local_id = ?'), [req.branch.id, localId]);
+      // Prefer the exact (branch, device, local_id) match this till meant.
+      // Falls back to any device's row of that number if that finds
+      // nothing — a dashboard-created account has no till of its own to
+      // report a device_id, so it can't always be found by one; better to
+      // still delete the account the till clearly meant than to silently
+      // do nothing because of a device_id it was never going to have.
+      // NULL is only possible for a dashboard-created row (see
+      // routes/staff.js's own POST, which never sets device_id at all,
+      // correctly, since no till is involved) — COALESCE so that still
+      // compares equal to 'legacy' instead of a NULL that matches nothing,
+      // not even itself.
+      let row = await client.query(db.toPg(
+        "SELECT local_id, device_id, name FROM staff WHERE branch_id = ? AND COALESCE(device_id, 'legacy') = ? AND local_id = ?"),
+        [req.branch.id, deviceId, localId]);
+      if (!row.rows.length) {
+        row = await client.query(db.toPg(
+          'SELECT local_id, device_id, name FROM staff WHERE branch_id = ? AND local_id = ? LIMIT 1'),
+          [req.branch.id, localId]);
+      }
+      if (!row.rows.length) return bumpVersion(client); // already gone — nothing to tombstone or delete
+
+      const matchedDeviceId = row.rows[0].device_id || 'legacy';
 
       await client.query(db.toPg(`
-        INSERT INTO staff_deletions (branch_id, local_id, name, deleted_by)
-        VALUES (?, ?, ?, 'till')
-        ON CONFLICT (branch_id, local_id) DO UPDATE SET
+        INSERT INTO staff_deletions (branch_id, device_id, local_id, name, deleted_by)
+        VALUES (?, ?, ?, ?, 'till')
+        ON CONFLICT (branch_id, device_id, local_id) DO UPDATE SET
           deleted_at = NOW(), name = EXCLUDED.name, deleted_by = EXCLUDED.deleted_by
-      `), [req.branch.id, localId, person.rows[0] ? person.rows[0].name : null]);
+      `), [req.branch.id, matchedDeviceId, localId, row.rows[0].name]);
 
-      await client.query(db.toPg('DELETE FROM staff WHERE branch_id = ? AND local_id = ?'),
-        [req.branch.id, localId]);
+      await client.query(db.toPg("DELETE FROM staff WHERE branch_id = ? AND COALESCE(device_id, 'legacy') = ? AND local_id = ?"),
+        [req.branch.id, matchedDeviceId, localId]);
 
       return bumpVersion(client);
     });
@@ -333,7 +357,7 @@ router.delete('/:branchId/:localId', requireUser, async (req, res) => {
 
   try {
     const person = await db.one(
-      'SELECT id, name, role, active FROM staff WHERE branch_id = ? AND local_id = ?',
+      'SELECT id, name, role, active, device_id FROM staff WHERE branch_id = ? AND local_id = ?',
       [branchId, localId]);
     if (!person) return res.status(404).json({ error: 'No such staff member.' });
 
@@ -374,16 +398,22 @@ router.delete('/:branchId/:localId', requireUser, async (req, res) => {
       }
     }
 
+    // The row's own device_id, not a guess — a dashboard delete can target
+    // a till-created account just as easily as a dashboard-created one, and
+    // the tombstone has to match whichever it actually was so that till's
+    // own next push can't resurrect it (see db/schema.js's migration note).
+    const deviceId = person.device_id || 'legacy';
+
     const version = await db.tx(async (client) => {
       await client.query(db.toPg(`
-        INSERT INTO staff_deletions (branch_id, local_id, name, deleted_by)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT (branch_id, local_id) DO UPDATE SET
+        INSERT INTO staff_deletions (branch_id, device_id, local_id, name, deleted_by)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (branch_id, device_id, local_id) DO UPDATE SET
           deleted_at = NOW(), name = EXCLUDED.name, deleted_by = EXCLUDED.deleted_by
-      `), [branchId, localId, person.name, (req.user && req.user.email) || null]);
+      `), [branchId, deviceId, localId, person.name, (req.user && req.user.email) || null]);
 
-      await client.query(db.toPg('DELETE FROM staff WHERE branch_id = ? AND local_id = ?'),
-        [branchId, localId]);
+      await client.query(db.toPg("DELETE FROM staff WHERE branch_id = ? AND COALESCE(device_id, 'legacy') = ? AND local_id = ?"),
+        [branchId, deviceId, localId]);
 
       return bumpVersion(client);
     });

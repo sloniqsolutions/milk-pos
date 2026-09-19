@@ -115,7 +115,12 @@ function syncDelete(localTable) {
 function syncStaffDelete(localId) {
   const config = readCloudConfig();
   if (!config) return;
-  deleteJson(config.cloudUrl, `/api/staff/local/${localId}`, config.apiKey).catch((err) => {
+  // device_id as a query param, not a body — DELETE requests carry no body
+  // here (see db/cloud-http.js's deleteJson). Without it, this delete would
+  // match *any* till's staff row of this same local_id once a branch can
+  // have more than one — see cloud/routes/staff.js's own note on why that
+  // used to be safe and now genuinely is not.
+  deleteJson(config.cloudUrl, `/api/staff/local/${localId}?device_id=${encodeURIComponent(getDeviceId())}`, config.apiKey).catch((err) => {
     console.error('[Cloud] sync staff delete failed:', err.message);
   });
 }
@@ -125,7 +130,7 @@ function syncStaffDelete(localId) {
 function syncExpenseDelete(localId) {
   const config = readCloudConfig();
   if (!config) return;
-  deleteJson(config.cloudUrl, `/api/expenses/local/${localId}`, config.apiKey).catch((err) => {
+  deleteJson(config.cloudUrl, `/api/expenses/local/${localId}?device_id=${encodeURIComponent(getDeviceId())}`, config.apiKey).catch((err) => {
     console.error('[Cloud] sync expense delete failed:', err.message);
   });
 }

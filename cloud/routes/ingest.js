@@ -232,10 +232,15 @@ function simpleIngest(table, columns, valuesFor, opts, after) {
  * to get subtly wrong than per-row filtering inside it.
  */
 async function dropDeletedStaff(client, branchId) {
+  // device_id-matched — see db/schema.js's migration note on staff_deletions.
+  // A NULL device_id (a dashboard-created row — see routes/staff.js's own
+  // POST) is coalesced to 'legacy' on both sides so it still compares
+  // equal, not against a NULL that matches nothing.
   await client.query(db.toPg(`
     DELETE FROM staff s
      USING staff_deletions d
      WHERE s.branch_id = ? AND d.branch_id = s.branch_id AND d.local_id = s.local_id
+       AND COALESCE(d.device_id, 'legacy') = COALESCE(s.device_id, 'legacy')
   `), [branchId]);
 }
 

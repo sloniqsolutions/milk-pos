@@ -90,19 +90,37 @@ router.post('/', requireUser, async (req, res) => {
 router.delete('/local/:localId', requireBranch, async (req, res) => {
   const localId = Number(req.params.localId);
   if (!Number.isFinite(localId)) return res.status(400).json({ error: 'Bad expense id.' });
+  // See db/schema.js's migration note on expense_deletions — without this,
+  // a delete from one till could tombstone (and keep re-deleting) a
+  // different till's unrelated expense that just happens to share a number.
+  const deviceId = (req.query.device_id && String(req.query.device_id)) || 'legacy';
 
   try {
     const version = await db.tx(async (client) => {
-      const existing = await client.query('SELECT description FROM expenses WHERE branch_id = $1 AND local_id = $2', [req.branch.id, localId]);
+      // Prefer the exact (branch, device, local_id) match this till meant;
+      // fall back to any device's row of that number if that finds
+      // nothing — same reasoning as cloud/routes/staff.js's identical fallback.
+      let existing = await client.query(
+        "SELECT description, device_id FROM expenses WHERE branch_id = $1 AND COALESCE(device_id, 'legacy') = $2 AND local_id = $3",
+        [req.branch.id, deviceId, localId]);
+      if (!existing.rows.length) {
+        existing = await client.query(
+          'SELECT description, device_id FROM expenses WHERE branch_id = $1 AND local_id = $2 LIMIT 1',
+          [req.branch.id, localId]);
+      }
+      if (!existing.rows.length) return bumpVersion(client); // already gone
+
+      const matchedDeviceId = existing.rows[0].device_id || 'legacy';
 
       await client.query(`
-        INSERT INTO expense_deletions (branch_id, local_id, description, deleted_by)
-        VALUES ($1, $2, $3, 'till')
-        ON CONFLICT (branch_id, local_id) DO UPDATE SET
+        INSERT INTO expense_deletions (branch_id, device_id, local_id, description, deleted_by)
+        VALUES ($1, $2, $3, $4, 'till')
+        ON CONFLICT (branch_id, device_id, local_id) DO UPDATE SET
           deleted_at = NOW(), description = EXCLUDED.description, deleted_by = EXCLUDED.deleted_by
-      `, [req.branch.id, localId, existing.rows[0] ? existing.rows[0].description : null]);
+      `, [req.branch.id, matchedDeviceId, localId, existing.rows[0].description]);
 
-      await client.query('DELETE FROM expenses WHERE branch_id = $1 AND local_id = $2', [req.branch.id, localId]);
+      await client.query("DELETE FROM expenses WHERE branch_id = $1 AND COALESCE(device_id, 'legacy') = $2 AND local_id = $3",
+        [req.branch.id, matchedDeviceId, localId]);
       return bumpVersion(client);
     });
 
@@ -121,17 +139,18 @@ router.delete('/:branchId/:localId', requireUser, async (req, res) => {
 
   try {
     const version = await db.tx(async (client) => {
-      const existing = await client.query('SELECT description FROM expenses WHERE branch_id = $1 AND local_id = $2', [branchId, localId]);
+      const existing = await client.query('SELECT description, device_id FROM expenses WHERE branch_id = $1 AND local_id = $2', [branchId, localId]);
       if (!existing.rows.length) return null;
+      const deviceId = existing.rows[0].device_id || 'legacy';
 
       await client.query(`
-        INSERT INTO expense_deletions (branch_id, local_id, description, deleted_by)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (branch_id, local_id) DO UPDATE SET
+        INSERT INTO expense_deletions (branch_id, device_id, local_id, description, deleted_by)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (branch_id, device_id, local_id) DO UPDATE SET
           deleted_at = NOW(), description = EXCLUDED.description, deleted_by = EXCLUDED.deleted_by
-      `, [branchId, localId, existing.rows[0].description, (req.user && req.user.email) || null]);
+      `, [branchId, deviceId, localId, existing.rows[0].description, (req.user && req.user.email) || null]);
 
-      await client.query('DELETE FROM expenses WHERE branch_id = $1 AND local_id = $2', [branchId, localId]);
+      await client.query("DELETE FROM expenses WHERE branch_id = $1 AND COALESCE(device_id, 'legacy') = $2 AND local_id = $3", [branchId, deviceId, localId]);
       return bumpVersion(client);
     });
 

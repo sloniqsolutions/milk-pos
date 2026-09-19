@@ -223,10 +223,15 @@ export default function Settings() {
         const pinNote = (result.needs_pin_reset && result.needs_pin_reset.length)
           ? ` PIN reset needed for: ${result.needs_pin_reset.join(', ')} — set a new one from the Staff screen.`
           : '';
-        setToast({
-          message: `Connected as ${result.branch_name}. Pulled in ${r.orders} orders, ${r.customers} customers and ${r.staff} staff already on the cloud.${pinNote}`,
-          type: 'success',
+        // Same reasoning as handleRestoreFromCloud's own forced sign-out —
+        // this pull just replaced the staff table too, so whoever is
+        // signed in right now may not exist under this id any more.
+        await alertCard({
+          title: 'Connected — and Caught Up',
+          message: `Connected as ${result.branch_name}. Pulled in ${r.orders} orders, ${r.customers} customers and ${r.staff} staff already on the cloud.${pinNote} Sign in again to continue.`,
+          tone: 'success',
         });
+        logout();
       } else {
         setToast({ message: `Connected as ${result.branch_name}. Sales will start syncing.`, type: 'success' });
       }
@@ -262,10 +267,19 @@ export default function Settings() {
       setRestorePin('');
       setRestoreOpen(false);
       setRestoreResult(result);
-      setToast({
-        message: `Restored ${result.restored.orders} orders and ${result.restored.customers} customers from the cloud.`,
-        type: 'success',
+      // The staff table was just wiped and refilled from the cloud's copy —
+      // this session's own account may now be a different row (or, rarely,
+      // a renumbered one — see backend/routes/cloud.js's applyCloudRestore),
+      // so the current session can no longer be trusted to still be valid.
+      // Signing out here, with an explanation, replaces what used to be a
+      // random 401 on whatever was clicked next — confusing on its own, and
+      // easy to mistake for the restore itself having failed silently.
+      await alertCard({
+        title: 'Restore Complete',
+        message: `Restored ${result.restored.orders} orders, ${result.restored.customers} customers, ${result.restored.staff} staff and ${result.restored.shifts} shifts from the cloud. Sign in again to continue — this device's session doesn't carry over a restore.`,
+        tone: 'success',
       });
+      logout();
     } catch (err) {
       setToast({ message: err.message || 'Could not restore from the cloud', type: 'error' });
     } finally {

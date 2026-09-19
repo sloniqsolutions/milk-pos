@@ -579,13 +579,20 @@ CREATE INDEX IF NOT EXISTS branch_backups_recent ON branch_backups (branch_id, b
 -- Past orders, shifts and expenses are unaffected: each stores the person's
 -- name inline at the time it was recorded, so history keeps reading correctly
 -- with nobody to point at.
+-- device_id distinguishes which till's numbering a deletion belongs to —
+-- without it, one till deleting "staff 5" would tombstone every future
+-- push of *any* till's own "staff 5" too, deleting an unrelated person's
+-- account the moment their till's regular staff-list push next ran. See
+-- the migration block below for the same reasoning applied to an
+-- already-deployed database.
 CREATE TABLE IF NOT EXISTS staff_deletions (
   branch_id  INTEGER NOT NULL,
+  device_id  TEXT NOT NULL DEFAULT 'legacy',
   local_id   INTEGER NOT NULL,
   name       TEXT,
   deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   deleted_by TEXT,
-  PRIMARY KEY (branch_id, local_id)
+  PRIMARY KEY (branch_id, device_id, local_id)
 );
 
 -- ----------------------------------------------------- dashboard CRUD -----
@@ -647,10 +654,11 @@ CREATE TABLE IF NOT EXISTS expense_version (
   CONSTRAINT expense_version_single_row CHECK (id = 1)
 );
 INSERT INTO expense_version (id, version) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
+-- Same device_id reasoning as staff_deletions above.
 CREATE TABLE IF NOT EXISTS expense_deletions (
-  branch_id INTEGER NOT NULL, local_id INTEGER NOT NULL, description TEXT,
+  branch_id INTEGER NOT NULL, device_id TEXT NOT NULL DEFAULT 'legacy', local_id INTEGER NOT NULL, description TEXT,
   deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), deleted_by TEXT,
-  PRIMARY KEY (branch_id, local_id)
+  PRIMARY KEY (branch_id, device_id, local_id)
 );
 
 -- ------------------------------------------------------------- pairing --
@@ -804,6 +812,24 @@ ALTER TABLE staff             ADD CONSTRAINT staff_branch_id_device_id_local_id_
 ALTER TABLE customers         ADD CONSTRAINT customers_branch_id_device_id_local_id_key UNIQUE (branch_id, device_id, local_id);
 ALTER TABLE credit_payments   ADD CONSTRAINT credit_payments_branch_id_device_id_local_id_key UNIQUE (branch_id, device_id, local_id);
 ALTER TABLE inventory_entries ADD CONSTRAINT inventory_entries_branch_id_device_id_local_id_key UNIQUE (branch_id, device_id, local_id);
+
+-- Same device_id treatment for the two tombstone tables — a delete from one
+-- till must not be able to suppress a resurrection of a *different* till's
+-- unrelated row of the same number (see routes/staff.js's DELETE
+-- /local/:localId and routes/ingest.js's dropDeletedStaff, the two things
+-- that actually read these). Every existing row predates any till sending
+-- a device_id, so 'legacy' is exactly right for them, not a guess — that
+-- was already the only device_id any of them could have meant.
+ALTER TABLE staff_deletions   ADD COLUMN IF NOT EXISTS device_id TEXT NOT NULL DEFAULT 'legacy';
+ALTER TABLE expense_deletions ADD COLUMN IF NOT EXISTS device_id TEXT NOT NULL DEFAULT 'legacy';
+
+ALTER TABLE staff_deletions   DROP CONSTRAINT IF EXISTS staff_deletions_pkey;
+ALTER TABLE staff_deletions   DROP CONSTRAINT IF EXISTS staff_deletions_branch_id_device_id_local_id_pkey;
+ALTER TABLE staff_deletions   ADD CONSTRAINT staff_deletions_branch_id_device_id_local_id_pkey PRIMARY KEY (branch_id, device_id, local_id);
+
+ALTER TABLE expense_deletions DROP CONSTRAINT IF EXISTS expense_deletions_pkey;
+ALTER TABLE expense_deletions DROP CONSTRAINT IF EXISTS expense_deletions_branch_id_device_id_local_id_pkey;
+ALTER TABLE expense_deletions ADD CONSTRAINT expense_deletions_branch_id_device_id_local_id_pkey PRIMARY KEY (branch_id, device_id, local_id);
 
 -- ---------------------------------------------------------- activation --
 --
