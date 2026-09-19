@@ -175,6 +175,26 @@ router.post('/unpair', requireAdmin, (req, res) => {
 });
 
 /**
+ * POST /api/cloud/sync-now — push everything this till has, again.
+ *
+ * There was no way to ask for this before: every push in db/cloud-sync.js
+ * is fire-and-forget with no retry queue, on purpose — an offline or slow
+ * cloud must never delay or break a sale. The cost of that design, left
+ * unaddressed, is real: a till offline for a stretch (or briefly pointed at
+ * a wrong address — this exact thing happened once already) has no way to
+ * find out afterward, and nothing here was ever going to catch it back up
+ * on its own. pushInitialBackfill is already idempotent (every push is an
+ * upsert) and already proven safe to run any time — it just never had a
+ * button of its own outside of pairing.
+ */
+router.post('/sync-now', requireAdmin, (req, res) => {
+  const config = readCloudConfig();
+  if (!config) return res.status(400).json({ error: 'Connect to the cloud first, from the field above.' });
+  pushInitialBackfill();
+  res.json({ success: true });
+});
+
+/**
  * POST /api/cloud/restore-from-cloud — the opposite of pairing's usual
  * direction.
  *

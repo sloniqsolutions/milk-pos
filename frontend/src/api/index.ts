@@ -299,6 +299,7 @@ export const cloudAPI = {
       needs_pin_reset?: string[];
     }>('POST', '/cloud/pair', body),
   unpair: () => request<{ success: boolean }>('POST', '/cloud/unpair'),
+  syncNow: () => request<{ success: boolean }>('POST', '/cloud/sync-now'),
   restoreFromCloud: (body: { pin: string }) =>
     request<{
       success: boolean;
