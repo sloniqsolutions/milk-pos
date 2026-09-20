@@ -99,7 +99,7 @@ export default function OrdersScreen() {
         .then(d => setCompleteness(d.branches || []));
 
     load();
-    const poll = setInterval(load, 15000);
+    const poll = setInterval(load, 10000);
     return () => clearInterval(poll);
   }, [branchId, rangeKey]);
 

@@ -37,7 +37,7 @@ const router = express.Router();
 const db = require('../db/pg');
 
 const { localToday } = require('../db/local-date');
-const { unloggedSold } = require('../db/derived-usage');
+const { unloggedSold, unitAmount } = require('../db/derived-usage');
 const { requireUser } = require('../middleware/session');
 
 /**
@@ -566,6 +566,10 @@ router.get('/detailed', requireUser, async (req, res) => {
         -- own records, so it is the only one the owner can cross-reference.
         -- The cloud's own id exists purely to join rows together.
         o.local_id AS id,
+        -- The cloud's own row id: unique across every branch and till, unlike
+        -- the till's number above (two tills can each have an "order 7"). Only
+        -- used to join the quantities computed below back onto their order.
+        o.id AS row_key,
         o.created_at,
         o.cashier_id,
         o.cashier_name,
@@ -593,9 +597,22 @@ router.get('/detailed', requireUser, async (req, res) => {
         CASE WHEN COALESCE(br.code, '') = '' THEN o.local_id::text
              ELSE br.code || '-' || LPAD(o.local_id::text, 3, '0') END AS order_no,
         COALESCE(SUM(oi.price * oi.quantity)::float8, 0) AS subtotal,
-        COALESCE(SUM(oi.quantity)::int, 0)            AS total_qty,
+        -- Rounded, not cast: this used to be ::int, which turned a 0.3636-litre
+        -- sale into 0 and a 5.909-litre one into 6, so every total built from it was wrong.
+        ROUND(COALESCE(SUM(oi.quantity), 0)::numeric, 4)::float8 AS total_qty,
         COUNT(oi.id)::int                             AS line_count,
-        STRING_AGG(oi.name || ' x' || oi.quantity, ', ') AS items
+        STRING_AGG(oi.name || ' x' || oi.quantity, ', ') AS items,
+        -- The same order split by what was sold, so the report can be filtered
+        -- to Milk or Dahi (yogurt) and every figure still adds back up: an order
+        -- holding both appears under each, showing only that part.
+        COALESCE(SUM(oi.price * oi.quantity) FILTER (WHERE oi.category = 'Milk')::float8, 0) AS milk_value,
+        (COUNT(oi.id) FILTER (WHERE oi.category = 'Milk'))::int                              AS milk_lines,
+        STRING_AGG(oi.name || ' x' || oi.quantity, ', ') FILTER (WHERE oi.category = 'Milk') AS milk_items,
+        COALESCE(SUM(oi.price * oi.quantity) FILTER (WHERE oi.category = 'Dahi')::float8, 0) AS dahi_value,
+        (COUNT(oi.id) FILTER (WHERE oi.category = 'Dahi'))::int                              AS dahi_lines,
+        STRING_AGG(oi.name || ' x' || oi.quantity, ', ') FILTER (WHERE oi.category = 'Dahi') AS dahi_items,
+        COALESCE(SUM(oi.price * oi.quantity) FILTER (WHERE COALESCE(oi.category, '') NOT IN ('Milk', 'Dahi'))::float8, 0) AS other_value,
+        (COUNT(oi.id) FILTER (WHERE COALESCE(oi.category, '') NOT IN ('Milk', 'Dahi')))::int AS other_lines
       FROM orders o
       LEFT JOIN order_items oi ON oi.order_id = o.id
       LEFT JOIN branches br ON br.id = o.branch_id
@@ -608,8 +625,40 @@ router.get('/detailed', requireUser, async (req, res) => {
       ORDER BY o.created_at ASC
     `, [from, to, ...scope.params]);
 
+    /*
+     * How much Milk (litres) and Dahi (kilograms) each order holds.
+     *
+     * "Quantity" alone cannot be added up: a 2 Litre pack sold three times is
+     * quantity 3 but 6 litres; a custom line "Milk (0.63 L)" is quantity 0.63 and
+     * IS litres; "Dahi (192 g)" is quantity 0.1923 and is kilograms. So each line
+     * is turned into a real amount by db/derived-usage.js's unitAmount — the same
+     * rules the stock reports use — and summed per order here. Grouped by the
+     * cloud's own row id, never the till's order number, which repeats across tills.
+     */
+    const lines = await db.q(`
+      SELECT oi.order_id AS row_key, oi.category, oi.name, oi.quantity::float8 AS quantity
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+       WHERE o.created_at::date BETWEEN ?::date AND ?::date
+         ${includeVoided ? '' : "AND o.status != 'voided'"}${scope.sql}
+         AND oi.category IN ('Milk', 'Dahi')
+    `, [from, to, ...scope.params]);
+    const litres = new Map();
+    const kilos = new Map();
+    for (const l of lines) {
+      const amount = (Number(l.quantity) || 0) * unitAmount(l.category, l.name);
+      if (l.category === 'Milk') litres.set(l.row_key, (litres.get(l.row_key) || 0) + amount);
+      else kilos.set(l.row_key, (kilos.get(l.row_key) || 0) + amount / 1000);
+    }
+    const round4 = (n) => Math.round((n || 0) * 10000) / 10000;
+
     // GROUP_CONCAT returns NULL for an order with no line items.
-    res.json(orders.map(o => ({ ...o, items: o.items || '' })));
+    res.json(orders.map(o => ({
+      ...o,
+      items: o.items || '',
+      milk_qty: round4(litres.get(o.row_key)),
+      dahi_qty: round4(kilos.get(o.row_key)),
+    })));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

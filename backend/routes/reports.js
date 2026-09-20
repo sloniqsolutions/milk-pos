@@ -5,6 +5,7 @@ const db = require('../db/database');
 const { isAdminRole } = require('../middleware/auth');
 const { isRealDay, localDay } = require('../db/validate');
 const { unloggedSold } = require('../db/derived-usage');
+const { unitAmount } = require('../db/item-quantities');
 
 /**
  * Every report takes an optional from/to. An unreadable one (a typo, a
@@ -505,19 +506,55 @@ router.get('/detailed', (req, res) => {
         o.delivery_charge,
         o.total,
         COALESCE(SUM(oi.price * oi.quantity), 0) AS subtotal,
-        COALESCE(SUM(oi.quantity), 0)            AS total_qty,
+        ROUND(COALESCE(SUM(oi.quantity), 0), 4)  AS total_qty,
         COUNT(oi.id)                             AS line_count,
-        GROUP_CONCAT(oi.name || ' x' || oi.quantity, ', ') AS items
+        GROUP_CONCAT(oi.name || ' x' || oi.quantity, ', ') AS items,
+        -- The same order split by what was sold, so the report can be filtered to
+        -- Milk or Dahi (yogurt) and every figure still adds back up: an order
+        -- holding both appears under each, showing only that part.
+        COALESCE(SUM(oi.price * oi.quantity) FILTER (WHERE m.category = 'Milk'), 0) AS milk_value,
+        COUNT(oi.id) FILTER (WHERE m.category = 'Milk')                              AS milk_lines,
+        GROUP_CONCAT(oi.name || ' x' || oi.quantity, ', ') FILTER (WHERE m.category = 'Milk') AS milk_items,
+        COALESCE(SUM(oi.price * oi.quantity) FILTER (WHERE m.category = 'Dahi'), 0) AS dahi_value,
+        COUNT(oi.id) FILTER (WHERE m.category = 'Dahi')                              AS dahi_lines,
+        GROUP_CONCAT(oi.name || ' x' || oi.quantity, ', ') FILTER (WHERE m.category = 'Dahi') AS dahi_items,
+        COALESCE(SUM(oi.price * oi.quantity) FILTER (WHERE COALESCE(m.category, '') NOT IN ('Milk', 'Dahi')), 0) AS other_value,
+        COUNT(oi.id) FILTER (WHERE COALESCE(m.category, '') NOT IN ('Milk', 'Dahi'))  AS other_lines
       FROM orders o
       LEFT JOIN order_items oi ON oi.order_id = o.id
+      LEFT JOIN menu_items m ON m.id = oi.menu_item_id AND oi.is_deal = 0
       WHERE DATE(o.created_at) BETWEEN DATE(?) AND DATE(?)
         ${includeVoided ? '' : "AND o.status != 'voided'"}${scope.sql}
       GROUP BY o.id
       ORDER BY o.created_at ASC
     `).all(from, to, ...scope.params);
 
+    // Real litres of Milk and kilograms of Dahi per order — see db/item-quantities.js.
+    const lines = db.prepare(`
+      SELECT oi.order_id AS order_id, m.category AS category, oi.name AS name, oi.quantity AS quantity
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        JOIN menu_items m ON m.id = oi.menu_item_id AND oi.is_deal = 0
+       WHERE DATE(o.created_at) BETWEEN DATE(?) AND DATE(?)
+         ${includeVoided ? '' : "AND o.status != 'voided'"}${scope.sql}
+         AND m.category IN ('Milk', 'Dahi')
+    `).all(from, to, ...scope.params);
+    const litres = new Map();
+    const kilos = new Map();
+    for (const l of lines) {
+      const amount = (Number(l.quantity) || 0) * unitAmount(l.category, l.name);
+      if (l.category === 'Milk') litres.set(l.order_id, (litres.get(l.order_id) || 0) + amount);
+      else kilos.set(l.order_id, (kilos.get(l.order_id) || 0) + amount / 1000);
+    }
+    const round4 = (n) => Math.round((n || 0) * 10000) / 10000;
+
     // GROUP_CONCAT returns NULL for an order with no line items.
-    res.json(orders.map(o => ({ ...o, items: o.items || '' })));
+    res.json(orders.map(o => ({
+      ...o,
+      items: o.items || '',
+      milk_qty: round4(litres.get(o.id)),
+      dahi_qty: round4(kilos.get(o.id)),
+    })));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
