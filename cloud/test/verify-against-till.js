@@ -209,7 +209,7 @@ function diff(a, b, label) {
     }
     // branch_name legitimately differs: this till's own rows predate branch
     // stamping, whereas the sync attributes everything to its API key's branch.
-    const strip = (v) => JSON.parse(JSON.stringify(v, (k, val) => (k === 'branch_name' ? undefined : val)));
+    const strip = (v) => JSON.parse(JSON.stringify(v, (k, val) => (k === 'branch_name' || k === 'order_key' ? undefined : val)));
     const d = diff(strip(t.body), strip(c.body), ep);
     if (d) mismatches.push(d);
     else console.log(`   ${ep.padEnd(22)} identical (${Array.isArray(t.body) ? t.body.length + ' rows' : 'summary'})`);

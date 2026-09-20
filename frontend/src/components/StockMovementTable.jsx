@@ -14,17 +14,37 @@ const EPSILON = 0.005;
 /** Movements are stored by calendar day; tolerate a full timestamp rather than splitting one day into two rows. */
 const dayOf = (value) => String(value || '').slice(0, 10);
 
+// Deliberately quiet: one hairline colour, one muted text colour, and colour used
+// only where it carries meaning (stock coming in). Numbers align on their digits.
+const INK = '#111827';
+const MUTED = '#6B7280';
+const FAINT = '#9CA3AF';
+const HAIRLINE = '#EEF0F3';
+
 const thStyle = {
-  padding: '10px 12px', textAlign: 'right', fontSize: 11, fontWeight: 600,
-  color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.03em',
-  whiteSpace: 'nowrap', borderBottom: '1px solid #E5E7EB',
+  padding: '10px 12px', textAlign: 'right', fontSize: 11, fontWeight: 500,
+  color: FAINT, textTransform: 'uppercase', letterSpacing: '0.04em',
+  whiteSpace: 'nowrap', borderBottom: `1px solid ${HAIRLINE}`, background: '#FFFFFF',
 };
+const groupThStyle = { ...thStyle, textAlign: 'center', fontWeight: 600, color: MUTED, borderLeft: `1px solid ${HAIRLINE}` };
+const tdBase = { padding: '9px 12px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' };
+const groupStart = { borderLeft: `1px solid ${HAIRLINE}` };
 
 // Opening / Sold / Restocked / Converted / Waste / Closing per ingredient, plus
 // Other for an ingredient that has one (see showOther below).
 const BASE_COLS_PER_INGREDIENT = 6;
 
 const CLOSING_HINT = "Closing = the stock left at the end of the day. It equals the next day's Opening.";
+
+/** A quantity cell: the figure, or a faint dash when there is nothing to show. */
+function Cell({ value, unit, sign = '', color = INK, style }) {
+  const empty = value === null || value === undefined;
+  return (
+    <td style={{ ...tdBase, color: empty ? '#D1D5DB' : color, ...style }}>
+      {empty ? '—' : `${sign}${fmtQty(value)} ${unit}`}
+    </td>
+  );
+}
 
 /**
  * One row per DAY, sales and every ingredient's stock movement side by
@@ -77,23 +97,26 @@ export default function StockMovementTable({ salesByDay, stockMovement, ingredie
   const colsFor = (name) => BASE_COLS_PER_INGREDIENT + (showOther[name] ? 1 : 0);
   const colCount = 3 + names.reduce((n, name) => n + colsFor(name), 0);
 
+  // The date stays put while a wide table scrolls sideways.
+  const stickyDate = { position: 'sticky', left: 0, zIndex: 1, background: '#FFFFFF' };
+
   return (
-    <div style={{ background: '#FFFFFF', borderRadius: 12, border: '1px solid #E5E7EB', overflow: 'auto' }}>
-      <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 380 + names.reduce((n, name) => n + colsFor(name) * 84, 0) }}>
+    <div style={{ background: '#FFFFFF', borderRadius: 10, border: `1px solid ${HAIRLINE}`, overflow: 'auto' }}>
+      <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 380 + names.reduce((n, name) => n + colsFor(name) * 84, 0), fontSize: 13 }}>
         <thead>
-          <tr style={{ background: '#F9FAFB' }}>
-            <th rowSpan={2} style={{ ...thStyle, textAlign: 'left', verticalAlign: 'bottom' }}>Date</th>
-            <th colSpan={2} style={{ ...thStyle, textAlign: 'center', borderLeft: '1px solid #E5E7EB', fontWeight: 700, color: '#374151' }}>Sales</th>
+          <tr>
+            <th rowSpan={2} style={{ ...thStyle, ...stickyDate, textAlign: 'left', verticalAlign: 'bottom' }}>Date</th>
+            <th colSpan={2} style={groupThStyle}>Sales</th>
             {names.map((name) => (
-              <th key={name} colSpan={colsFor(name)} style={{ ...thStyle, textAlign: 'center', borderLeft: '1px solid #E5E7EB', fontWeight: 700, color: '#374151' }}>{name}</th>
+              <th key={name} colSpan={colsFor(name)} style={groupThStyle}>{name}</th>
             ))}
           </tr>
-          <tr style={{ background: '#F9FAFB' }}>
-            <th style={{ ...thStyle, textAlign: 'center', borderLeft: '1px solid #E5E7EB' }}>Orders</th>
-            <th style={{ ...thStyle, color: '#EA580C' }}>Net</th>
+          <tr>
+            <th style={{ ...thStyle, ...groupStart }}>Orders</th>
+            <th style={thStyle}>Net</th>
             {names.map((name) => (
               <React.Fragment key={name}>
-                <th style={{ ...thStyle, borderLeft: '1px solid #E5E7EB' }}>Opening</th>
+                <th style={{ ...thStyle, ...groupStart }}>Opening</th>
                 <th style={thStyle}>Sold</th>
                 <th style={thStyle}>Restocked</th>
                 <th style={thStyle}>Converted</th>
@@ -101,51 +124,41 @@ export default function StockMovementTable({ salesByDay, stockMovement, ingredie
                 {showOther[name] && (
                   <th style={thStyle} title="Stock changes with no column of their own: manual removals, set-the-count corrections, and sales that never logged a stock movement.">Other</th>
                 )}
-                <th style={{ ...thStyle, cursor: 'help' }} title={CLOSING_HINT}>Closing</th>
+                <th style={{ ...thStyle, color: MUTED, cursor: 'help' }} title={CLOSING_HINT}>Closing</th>
               </React.Fragment>
             ))}
           </tr>
         </thead>
         <tbody>
           {loading ? (
-            <tr><td colSpan={colCount} style={{ padding: 32, textAlign: 'center', color: '#9CA3AF' }}>Loading…</td></tr>
+            <tr><td colSpan={colCount} style={{ padding: 32, textAlign: 'center', color: FAINT }}>Loading…</td></tr>
           ) : rows.length === 0 ? (
-            <tr><td colSpan={colCount} style={{ padding: 32, textAlign: 'center', color: '#9CA3AF' }}>No data for this date range.</td></tr>
+            <tr><td colSpan={colCount} style={{ padding: 32, textAlign: 'center', color: FAINT }}>No data for this date range.</td></tr>
           ) : (
-            rows.map((r, i) => (
-              <tr key={r.date} style={{ borderBottom: '1px solid #F3F4F6', background: i % 2 === 0 ? '#FFFFFF' : '#FAFBFC' }}>
-                <td style={{ padding: '10px 12px', fontWeight: 600, color: '#111827', whiteSpace: 'nowrap' }}>
+            rows.map((r) => (
+              <tr key={r.date} style={{ borderBottom: `1px solid ${HAIRLINE}` }}>
+                <td style={{ ...tdBase, ...stickyDate, textAlign: 'left', fontWeight: 500, color: INK }}>
                   {moment(r.date).format('MMM D, YYYY')}
                 </td>
-                <td style={{ padding: '10px 12px', textAlign: 'center', color: '#374151', borderLeft: '1px solid #F3F4F6' }}>{r.orders}</td>
-                <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: '#111827' }}>{formatMoney(r.net)}</td>
+                <td style={{ ...tdBase, ...groupStart, color: MUTED }}>{r.orders}</td>
+                <td style={{ ...tdBase, fontWeight: 600, color: INK }}>{formatMoney(r.net)}</td>
                 {names.map((name) => {
                   const ing = r.byIngredient[name];
+                  const u = ing ? ing.unit : '';
                   return (
                     <React.Fragment key={name}>
-                      <td style={{ padding: '10px 12px', textAlign: 'right', color: '#6B7280', borderLeft: '1px solid #F3F4F6' }}>
-                        {ing && hasStatement && ing.opening_balance != null ? `${fmtQty(ing.opening_balance)} ${ing.unit}` : '—'}
-                      </td>
-                      <td style={{ padding: '10px 12px', textAlign: 'right', color: '#111827' }}>
-                        {ing && ing.sold > 0 ? `-${fmtQty(ing.sold)} ${ing.unit}` : '—'}
-                      </td>
-                      <td style={{ padding: '10px 12px', textAlign: 'right', color: '#15803D' }}>
-                        {ing && ing.restocked > 0 ? `+${fmtQty(ing.restocked)} ${ing.unit}` : '—'}
-                      </td>
-                      <td style={{ padding: '10px 12px', textAlign: 'right', color: '#1D4ED8' }}>
-                        {ing && ing.converted !== 0 ? `${ing.converted > 0 ? '+' : ''}${fmtQty(ing.converted)} ${ing.unit}` : '—'}
-                      </td>
-                      <td style={{ padding: '10px 12px', textAlign: 'right', color: '#EF4444' }}>
-                        {ing && ing.waste > 0 ? `-${fmtQty(ing.waste)} ${ing.unit}` : '—'}
-                      </td>
+                      <Cell style={groupStart} color={MUTED} unit={u}
+                        value={ing && hasStatement && ing.opening_balance != null ? ing.opening_balance : null} />
+                      <Cell unit={u} sign="-" value={ing && ing.sold > 0 ? ing.sold : null} />
+                      <Cell unit={u} sign="+" color="#15803D" value={ing && ing.restocked > 0 ? ing.restocked : null} />
+                      <Cell unit={u} sign={ing && ing.converted > 0 ? '+' : '-'} value={ing && ing.converted !== 0 ? Math.abs(ing.converted) : null} />
+                      <Cell unit={u} sign="-" value={ing && ing.waste > 0 ? ing.waste : null} />
                       {showOther[name] && (
-                        <td style={{ padding: '10px 12px', textAlign: 'right', color: '#B45309' }}>
-                          {ing && Math.abs(Number(ing.adjustment) || 0) >= EPSILON
-                            ? `${ing.adjustment > 0 ? '+' : '-'}${fmtQty(Math.abs(ing.adjustment))} ${ing.unit}` : '—'}
-                        </td>
+                        <Cell unit={u} sign={ing && ing.adjustment > 0 ? '+' : '-'}
+                          value={ing && Math.abs(Number(ing.adjustment) || 0) >= EPSILON ? Math.abs(ing.adjustment) : null} />
                       )}
-                      <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: '#111827' }}>
-                        {ing && ing.closing_balance != null ? `${fmtQty(ing.closing_balance)} ${ing.unit}` : '—'}
+                      <td style={{ ...tdBase, fontWeight: 600, color: INK }}>
+                        {ing && ing.closing_balance != null ? `${fmtQty(ing.closing_balance)} ${u}` : '—'}
                       </td>
                     </React.Fragment>
                   );
@@ -155,7 +168,7 @@ export default function StockMovementTable({ salesByDay, stockMovement, ingredie
           )}
         </tbody>
       </table>
-      <div style={{ padding: '10px 12px', fontSize: 12, color: '#6B7280', borderTop: '1px solid #F3F4F6' }}>
+      <div style={{ padding: '10px 12px', fontSize: 12, color: FAINT, borderTop: `1px solid ${HAIRLINE}` }}>
         Opening + Restocked ± Converted − Sold − Waste ± Other = Closing
       </div>
     </div>

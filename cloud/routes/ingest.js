@@ -331,6 +331,49 @@ async function ingestInventoryEntries(client, branchId, rows, receivedAt, device
   await client.query(sql, params);
 }
 
+/** Where cloud-created rows' numbers start — see routes/customers.js's copy of this constant. */
+const CLOUD_ID_BASE = 10000;
+
+const ingestCustomersFromTill = simpleIngest('customers', CUSTOMER_COLS, r => [
+  str(r.name), str(r.phone), str(r.address), str(r.notes), num(r.active),
+  num(r.order_count), num(r.total_spent),
+  str(r.first_order_at), str(r.last_order_at),
+  num(r.total_credited), num(r.total_paid), num(r.balance), num(r.total_litres),
+], {
+  alwaysCols: ['order_count', 'total_spent', 'first_order_at', 'last_order_at', 'total_credited', 'total_paid', 'balance', 'total_litres'],
+  gateCondition: "customers.origin <> 'cloud'",
+}, dropDeletedCustomers);
+
+/**
+ * Customers. A customer created on the dashboard is numbered from
+ * CLOUD_ID_BASE and stored with no till id (routes/customers.js's POST), and
+ * every till pulls it down under that same number. When that till later pushed
+ * the customer's balance back — a credit sale, a payment, the pairing backfill —
+ * the row was keyed (branch, THIS TILL, number), matched nothing, and was filed
+ * as a second copy of the same person. A fresh install then restored both, which
+ * is how "Staff Milk" and "Suleman" came up twice.
+ *
+ * A number at or above CLOUD_ID_BASE means the same customer whichever till
+ * pushes it, so those rows update the dashboard's own row in place. Only when no
+ * such row exists (the dashboard row was deleted, or the number is a till's own)
+ * does the ordinary upsert run.
+ */
+async function ingestCustomers(client, branchId, rows, receivedAt, deviceId) {
+  const unmatched = [];
+  for (const r of rows) {
+    if (!(num(r.id) >= CLOUD_ID_BASE)) { unmatched.push(r); continue; }
+    const updated = await client.query(
+      `UPDATE customers SET order_count = $3, total_spent = $4, first_order_at = $5, last_order_at = $6,
+              total_credited = $7, total_paid = $8, balance = $9, total_litres = $10, received_at = $11
+        WHERE branch_id = $1 AND local_id = $2 AND origin = 'cloud'`,
+      [branchId, num(r.id), num(r.order_count), num(r.total_spent), str(r.first_order_at), str(r.last_order_at),
+       num(r.total_credited), num(r.total_paid), num(r.balance), num(r.total_litres), receivedAt]);
+    if (!updated.rowCount) unmatched.push(r);
+  }
+  if (unmatched.length) await ingestCustomersFromTill(client, branchId, unmatched, receivedAt, deviceId);
+  else await dropDeletedCustomers(client, branchId);
+}
+
 const HANDLERS = {
   orders: ingestOrders,
 
@@ -373,15 +416,7 @@ const HANDLERS = {
   // there is nowhere else they could come from. Name/phone/address/notes
   // only update when the dashboard hasn't claimed the row (see
   // routes/customers.js).
-  customers: simpleIngest('customers', CUSTOMER_COLS, r => [
-    str(r.name), str(r.phone), str(r.address), str(r.notes), num(r.active),
-    num(r.order_count), num(r.total_spent),
-    str(r.first_order_at), str(r.last_order_at),
-    num(r.total_credited), num(r.total_paid), num(r.balance), num(r.total_litres),
-  ], {
-    alwaysCols: ['order_count', 'total_spent', 'first_order_at', 'last_order_at', 'total_credited', 'total_paid', 'balance', 'total_litres'],
-    gateCondition: "customers.origin <> 'cloud'",
-  }, dropDeletedCustomers),
+  customers: ingestCustomers,
 
   // The individual events behind a customer's balance — see db/schema.js's
   // credit_payments table for why this exists (branch-data.js's shift
@@ -456,3 +491,4 @@ router.post('/batch', requireBranch, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.ingestCustomers = ingestCustomers;

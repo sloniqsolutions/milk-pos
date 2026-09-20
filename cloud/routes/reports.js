@@ -39,6 +39,10 @@ const db = require('../db/pg');
 const { localToday } = require('../db/local-date');
 const { unloggedSold, unitAmount } = require('../db/derived-usage');
 const { closingLookup, withStatement } = require('../db/stock-statement');
+const { createClassifier } = require('../db/line-classifier');
+
+// One definition of Milk / Dahi / Other for every report — see db/line-classifier.js.
+const { classifyLine, splitOrderLines } = createClassifier(unitAmount);
 const { requireUser } = require('../middleware/session');
 
 /**
@@ -415,7 +419,9 @@ router.get('/top-items', requireUser, async (req, res) => {
     const items = await db.q(`
       SELECT
         oi.name,
-        SUM(oi.quantity)::int as total_qty,
+        -- float8, not int: a custom Milk line is a fractional quantity (0.63 L), and
+        -- ::int rounded it — so this total disagreed with the till's, which does not.
+        SUM(oi.quantity)::float8 as total_qty,
         SUM(oi.price * oi.quantity)::float8 as total_revenue,
         COUNT(DISTINCT oi.order_id)::int as order_count
       FROM order_items oi
@@ -456,15 +462,20 @@ router.get('/by-category', requireUser, async (req, res) => {
     // bucket rather than being filed under an unrelated item's category.
     const data = await db.q(`
       SELECT
-        COALESCE(oi.category, 'Uncategorized') AS category,
-        SUM(oi.quantity)::int as total_qty,
+        -- A deal is its own bucket, as on the till: the till sends a NULL category for one,
+        -- which would otherwise be filed under 'Uncategorized'.
+        CASE
+          WHEN COALESCE(oi.is_deal, 0) = 1 THEN 'Deals'
+          ELSE COALESCE(oi.category, 'Uncategorized')
+        END AS category,
+        SUM(oi.quantity)::float8 as total_qty,
         SUM(oi.price * oi.quantity)::float8 as total_revenue
       FROM order_items oi
       JOIN orders o ON oi.order_id = o.id
       LEFT JOIN branches br ON br.id = o.branch_id
       WHERE o.created_at::date BETWEEN ?::date AND ?::date
       AND o.status != 'voided'${scope.sql}
-      GROUP BY category
+      GROUP BY 1
       ORDER BY total_revenue DESC
     `, [from, to, ...scope.params]);
 
@@ -611,18 +622,7 @@ router.get('/detailed', requireUser, async (req, res) => {
         -- sale into 0 and a 5.909-litre one into 6, so every total built from it was wrong.
         ROUND(COALESCE(SUM(oi.quantity), 0)::numeric, 4)::float8 AS total_qty,
         COUNT(oi.id)::int                             AS line_count,
-        STRING_AGG(oi.name || ' x' || oi.quantity, ', ') AS items,
-        -- The same order split by what was sold, so the report can be filtered
-        -- to Milk or Dahi (yogurt) and every figure still adds back up: an order
-        -- holding both appears under each, showing only that part.
-        COALESCE(SUM(oi.price * oi.quantity) FILTER (WHERE oi.category = 'Milk')::float8, 0) AS milk_value,
-        (COUNT(oi.id) FILTER (WHERE oi.category = 'Milk'))::int                              AS milk_lines,
-        STRING_AGG(oi.name || ' x' || oi.quantity, ', ') FILTER (WHERE oi.category = 'Milk') AS milk_items,
-        COALESCE(SUM(oi.price * oi.quantity) FILTER (WHERE oi.category = 'Dahi')::float8, 0) AS dahi_value,
-        (COUNT(oi.id) FILTER (WHERE oi.category = 'Dahi'))::int                              AS dahi_lines,
-        STRING_AGG(oi.name || ' x' || oi.quantity, ', ') FILTER (WHERE oi.category = 'Dahi') AS dahi_items,
-        COALESCE(SUM(oi.price * oi.quantity) FILTER (WHERE COALESCE(oi.category, '') NOT IN ('Milk', 'Dahi'))::float8, 0) AS other_value,
-        (COUNT(oi.id) FILTER (WHERE COALESCE(oi.category, '') NOT IN ('Milk', 'Dahi')))::int AS other_lines
+        STRING_AGG(oi.name || ' x' || oi.quantity, ', ') AS items
       FROM orders o
       LEFT JOIN order_items oi ON oi.order_id = o.id
       LEFT JOIN branches br ON br.id = o.branch_id
@@ -636,38 +636,33 @@ router.get('/detailed', requireUser, async (req, res) => {
     `, [from, to, ...scope.params]);
 
     /*
-     * How much Milk (litres) and Dahi (kilograms) each order holds.
-     *
-     * "Quantity" alone cannot be added up: a 2 Litre pack sold three times is
-     * quantity 3 but 6 litres; a custom line "Milk (0.63 L)" is quantity 0.63 and
-     * IS litres; "Dahi (192 g)" is quantity 0.1923 and is kilograms. So each line
-     * is turned into a real amount by db/derived-usage.js's unitAmount — the same
-     * rules the stock reports use — and summed per order here. Grouped by the
-     * cloud's own row id, never the till's order number, which repeats across tills.
+     * Every order's lines split into Milk / Dahi / Other by the ONE classifier
+     * (db/line-classifier.js) — the same one Item Sales uses and the same file the
+     * till uses, so the views and both surfaces agree. Real litres of Milk and
+     * kilograms of Dahi per order come from the same place (unitAmount, the stock
+     * reports' own rule). Grouped by the cloud's own row id, never the till's
+     * order number, which repeats across tills.
      */
     const lines = await db.q(`
-      SELECT oi.order_id AS row_key, oi.category, oi.name, oi.quantity::float8 AS quantity
+      SELECT oi.order_id AS key, oi.category, COALESCE(oi.is_deal, 0) AS is_deal,
+             oi.name, oi.quantity::float8 AS quantity, oi.price::float8 AS price
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
        WHERE o.created_at::date BETWEEN ?::date AND ?::date
          ${includeVoided ? '' : "AND o.status != 'voided'"}${scope.sql}
-         AND oi.category IN ('Milk', 'Dahi')
     `, [from, to, ...scope.params]);
-    const litres = new Map();
-    const kilos = new Map();
-    for (const l of lines) {
-      const amount = (Number(l.quantity) || 0) * unitAmount(l.category, l.name);
-      if (l.category === 'Milk') litres.set(l.row_key, (litres.get(l.row_key) || 0) + amount);
-      else kilos.set(l.row_key, (kilos.get(l.row_key) || 0) + amount / 1000);
-    }
-    const round4 = (n) => Math.round((n || 0) * 10000) / 10000;
+    const split = splitOrderLines(lines);
+    const none = {
+      milk_value: 0, milk_lines: 0, milk_items: null, milk_qty: 0,
+      dahi_value: 0, dahi_lines: 0, dahi_items: null, dahi_qty: 0,
+      other_value: 0, other_lines: 0,
+    };
 
-    // GROUP_CONCAT returns NULL for an order with no line items.
+    // STRING_AGG returns NULL for an order with no line items.
     res.json(orders.map(o => ({
       ...o,
       items: o.items || '',
-      milk_qty: round4(litres.get(o.row_key)),
-      dahi_qty: round4(kilos.get(o.row_key)),
+      ...(split.get(o.row_key) || none),
     })));
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -678,10 +673,9 @@ router.get('/detailed', requireUser, async (req, res) => {
  * Line-item report — one row per item sold, rather than per order.
  *
  * This is what makes an item-level CSV possible: which dish sold, when, at
- * what unit price, on whose till. Category is resolved through menu_items and
- * falls back to 'Deal / Removed Item' when the id does not resolve, which is
- * the case for deals (they record the deal's id, not a menu item's) and for
- * items deleted from the menu after the sale.
+ * what unit price, on whose till. `category` is the menu's own label: 'Deals' for a
+ * deal, 'Removed Item' when the item was deleted from the menu after the sale. The
+ * Milk / Dahi / Other split (`category_group`) is db/line-classifier.js's.
  */
 router.get('/line-items', requireUser, async (req, res) => {
   const { from, to } = getDateRange(req);
@@ -700,9 +694,18 @@ router.get('/line-items', requireUser, async (req, res) => {
         o.payment_method,
         o.status,
         br.name         AS branch_name,
+        -- CLOUD: the cloud's own row id, which is what tells two tills' "order 7"
+        -- apart. (The till's copy of this column is the same as order_id.)
+        o.id            AS order_key,
         oi.name         AS item_name,
-        -- CLOUD: resolved by the till at push time.
-        COALESCE(oi.category, 'Removed Item') AS category,
+        COALESCE(oi.is_deal, 0) AS is_deal,
+        -- CLOUD: resolved by the till at push time. The till sends a NULL category
+        -- for a deal, so the deal check comes first — otherwise the cloud said
+        -- 'Removed Item' where the till says 'Deals' for the very same line.
+        CASE
+          WHEN COALESCE(oi.is_deal, 0) = 1 THEN 'Deals'
+          ELSE COALESCE(oi.category, 'Removed Item')
+        END AS category,
         oi.quantity,
         oi.price        AS unit_price,
         (oi.price * oi.quantity) AS line_total
@@ -714,7 +717,21 @@ router.get('/line-items', requireUser, async (req, res) => {
       ORDER BY o.created_at ASC, oi.id ASC
     `, [from, to, ...scope.params]);
 
-    res.json(rows);
+    // The product each line is, and its real amount (litres / kg) — see
+    // db/line-classifier.js, which is the till's own copy.
+    const round4 = (n) => Math.round((n || 0) * 10000) / 10000;
+    res.json(rows.map((r) => {
+      const c = classifyLine({ category: r.category, is_deal: r.is_deal, name: r.item_name, quantity: r.quantity });
+      return {
+        ...r,
+        is_deal: Number(r.is_deal) === 1 ? 1 : 0,
+        category_group: c.group,
+        amount: round4(c.amount),
+        category_inferred: c.inferred,
+        category_review: c.review,
+        amount_assumed: c.amount_assumed,
+      };
+    }));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

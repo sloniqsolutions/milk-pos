@@ -8,6 +8,10 @@ const { unloggedSold } = require('../db/derived-usage');
 const { unitAmount } = require('../db/item-quantities');
 const { closingLookup, withStatement } = require('../db/stock-statement');
 const { RESTORED_NOTE_LIKE } = require('../db/person-key');
+const { createClassifier } = require('../db/line-classifier');
+
+// One definition of Milk / Dahi / Other for every report — see db/line-classifier.js.
+const { classifyLine, splitOrderLines } = createClassifier(unitAmount);
 
 /**
  * Every report takes an optional from/to. An unreadable one (a typo, a
@@ -524,52 +528,40 @@ router.get('/detailed', (req, res) => {
         COALESCE(SUM(oi.price * oi.quantity), 0) AS subtotal,
         ROUND(COALESCE(SUM(oi.quantity), 0), 4)  AS total_qty,
         COUNT(oi.id)                             AS line_count,
-        GROUP_CONCAT(oi.name || ' x' || oi.quantity, ', ') AS items,
-        -- The same order split by what was sold, so the report can be filtered to
-        -- Milk or Dahi (yogurt) and every figure still adds back up: an order
-        -- holding both appears under each, showing only that part.
-        COALESCE(SUM(oi.price * oi.quantity) FILTER (WHERE m.category = 'Milk'), 0) AS milk_value,
-        COUNT(oi.id) FILTER (WHERE m.category = 'Milk')                              AS milk_lines,
-        GROUP_CONCAT(oi.name || ' x' || oi.quantity, ', ') FILTER (WHERE m.category = 'Milk') AS milk_items,
-        COALESCE(SUM(oi.price * oi.quantity) FILTER (WHERE m.category = 'Dahi'), 0) AS dahi_value,
-        COUNT(oi.id) FILTER (WHERE m.category = 'Dahi')                              AS dahi_lines,
-        GROUP_CONCAT(oi.name || ' x' || oi.quantity, ', ') FILTER (WHERE m.category = 'Dahi') AS dahi_items,
-        COALESCE(SUM(oi.price * oi.quantity) FILTER (WHERE COALESCE(m.category, '') NOT IN ('Milk', 'Dahi')), 0) AS other_value,
-        COUNT(oi.id) FILTER (WHERE COALESCE(m.category, '') NOT IN ('Milk', 'Dahi'))  AS other_lines
+        GROUP_CONCAT(oi.name || ' x' || oi.quantity, ', ') AS items
       FROM orders o
       LEFT JOIN order_items oi ON oi.order_id = o.id
-      LEFT JOIN menu_items m ON m.id = oi.menu_item_id AND oi.is_deal = 0
       WHERE DATE(o.created_at) BETWEEN DATE(?) AND DATE(?)
         ${includeVoided ? '' : "AND o.status != 'voided'"}${scope.sql}
       GROUP BY o.id
       ORDER BY o.created_at ASC
     `).all(from, to, ...scope.params);
 
-    // Real litres of Milk and kilograms of Dahi per order — see db/item-quantities.js.
+    // Every order's lines split into Milk / Dahi / Other by the ONE classifier
+    // (db/line-classifier.js) — the same one Item Sales uses, so the two views
+    // cannot disagree. Real litres of Milk and kilograms of Dahi per order come
+    // from the same place (see db/item-quantities.js).
     const lines = db.prepare(`
-      SELECT oi.order_id AS order_id, m.category AS category, oi.name AS name, oi.quantity AS quantity
+      SELECT oi.order_id AS key, m.category AS category, oi.is_deal AS is_deal,
+             oi.name AS name, oi.quantity AS quantity, oi.price AS price
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
-        JOIN menu_items m ON m.id = oi.menu_item_id AND oi.is_deal = 0
+        LEFT JOIN menu_items m ON m.id = oi.menu_item_id AND oi.is_deal = 0
        WHERE DATE(o.created_at) BETWEEN DATE(?) AND DATE(?)
          ${includeVoided ? '' : "AND o.status != 'voided'"}${scope.sql}
-         AND m.category IN ('Milk', 'Dahi')
     `).all(from, to, ...scope.params);
-    const litres = new Map();
-    const kilos = new Map();
-    for (const l of lines) {
-      const amount = (Number(l.quantity) || 0) * unitAmount(l.category, l.name);
-      if (l.category === 'Milk') litres.set(l.order_id, (litres.get(l.order_id) || 0) + amount);
-      else kilos.set(l.order_id, (kilos.get(l.order_id) || 0) + amount / 1000);
-    }
-    const round4 = (n) => Math.round((n || 0) * 10000) / 10000;
+    const split = splitOrderLines(lines);
+    const none = {
+      milk_value: 0, milk_lines: 0, milk_items: null, milk_qty: 0,
+      dahi_value: 0, dahi_lines: 0, dahi_items: null, dahi_qty: 0,
+      other_value: 0, other_lines: 0,
+    };
 
     // GROUP_CONCAT returns NULL for an order with no line items.
     res.json(orders.map(o => ({
       ...o,
       items: o.items || '',
-      milk_qty: round4(litres.get(o.id)),
-      dahi_qty: round4(kilos.get(o.id)),
+      ...(split.get(o.id) || none),
     })));
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -580,10 +572,9 @@ router.get('/detailed', (req, res) => {
  * Line-item report — one row per item sold, rather than per order.
  *
  * This is what makes an item-level CSV possible: which dish sold, when, at
- * what unit price, on whose till. Category is resolved through menu_items and
- * falls back to 'Deal / Removed Item' when the id does not resolve, which is
- * the case for deals (they record the deal's id, not a menu item's) and for
- * items deleted from the menu after the sale.
+ * what unit price, on whose till. `category` is the menu's own label: 'Deals' for a
+ * deal, 'Removed Item' when the item was deleted from the menu after the sale. The
+ * Milk / Dahi / Other split (`category_group`) is db/line-classifier.js's.
  */
 router.get('/line-items', (req, res) => {
   const { from, to } = getDateRange(req);
@@ -594,6 +585,9 @@ router.get('/line-items', (req, res) => {
     const rows = db.prepare(`
       SELECT
         o.id            AS order_id,
+        -- What identifies the order across tills: the same as order_id here, but
+        -- not on the cloud, where two tills can each have an "order 7".
+        o.id            AS order_key,
         o.created_at,
         o.cashier_name,
         o.order_type,
@@ -601,6 +595,7 @@ router.get('/line-items', (req, res) => {
         o.payment_method,
         o.status,
         oi.name         AS item_name,
+        oi.is_deal      AS is_deal,
         CASE
           WHEN oi.is_deal = 1 THEN 'Deals'
           ELSE COALESCE(m.category, 'Removed Item')
@@ -616,7 +611,21 @@ router.get('/line-items', (req, res) => {
       ORDER BY o.created_at ASC, oi.id ASC
     `).all(from, to, ...scope.params);
 
-    res.json(rows);
+    // The product each line is, and its real amount (litres / kg) — see
+    // db/line-classifier.js. `category` above stays the menu's own label.
+    const round4 = (n) => Math.round((n || 0) * 10000) / 10000;
+    res.json(rows.map((r) => {
+      const c = classifyLine({ category: r.category, is_deal: r.is_deal, name: r.item_name, quantity: r.quantity });
+      return {
+        ...r,
+        is_deal: Number(r.is_deal) === 1 ? 1 : 0,
+        category_group: c.group,
+        amount: round4(c.amount),
+        category_inferred: c.inferred,
+        category_review: c.review,
+        amount_assumed: c.amount_assumed,
+      };
+    }));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

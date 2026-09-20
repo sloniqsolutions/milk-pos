@@ -5,6 +5,7 @@ import { reportsAPI } from '@/api/index';
 import StockMovementTable from '@/components/StockMovementTable';
 import { buildCsv, money } from '@/lib/csv';
 import { CATEGORY_FILTERS, buildView, summarize, hasCategoryData, fmtAmountQty } from '@/lib/detailedView';
+import { filterLineItems, summarizeLineItems, hasLineCategoryData } from '@/lib/itemSalesView';
 import { useSettings } from '@/lib/SettingsContext';
 import { useAuth } from '@/context/AuthContext';
 import writeXlsxFile from 'write-excel-file/browser';
@@ -59,7 +60,7 @@ export default function Reports({ onNavigate }) {
   const [loadError, setLoadError] = useState(null);
 
   const [reportFormat, setReportFormat] = useState('summary');
-  // Detailed report only: 'all' | 'Milk' | 'Dahi' (Dahi and yogurt are the same product).
+  // Detailed and Item Sales: 'all' | 'Milk' | 'Dahi' (Dahi and yogurt are the same product).
   const [catFilter, setCatFilter] = useState('all');
   // Shop name (used to name the exported file) and money formatting both
   // come from the shared settings provider rather than a second fetch.
@@ -95,6 +96,17 @@ export default function Reports({ onNavigate }) {
   // Totals are always over EVERY order in the range, never just the rows drawn.
   const detailedSummary = useMemo(() => summarize(detailedReport, activeCat), [detailedReport, activeCat]);
   const overall = useMemo(() => summarize(detailedReport, 'all'), [detailedReport]);
+
+  // The same Milk / Dahi filter for Item Sales (see lib/itemSalesView.js), sharing
+  // the chips' state with Detailed. An older backend that does not classify each
+  // line simply gets no filter. Totals are over EVERY line in the range.
+  const lineData = hasLineCategoryData(lineItems);
+  const activeLineCat = lineData ? catFilter : 'all';
+  const lineFiltered = activeLineCat !== 'all';
+  const lineUnit = activeLineCat === 'Milk' ? 'L' : 'kg';
+  const lineView = useMemo(() => filterLineItems(lineItems, activeLineCat), [lineItems, activeLineCat]);
+  const lineSummary = useMemo(() => summarizeLineItems(lineItems, activeLineCat), [lineItems, activeLineCat]);
+  const productLabel = (cat) => (cat === 'Dahi' ? 'Dahi / Yogurt' : 'Milk');
 
   // Calculate dates based on filter
   const { from, to } = useMemo(() => {
@@ -293,28 +305,46 @@ export default function Reports({ onNavigate }) {
     }
 
     if (reportFormat === 'items') {
-      const t = { qty: 0, value: 0 };
-      lineItems.forEach(r => {
-        t.qty += Number(r.quantity) || 0;
-        t.value += Number(r.line_total) || 0;
-      });
+      // What is on screen is what is exported: the filtered lines, and the same
+      // totals the footer shows (lib/itemSalesView.js), over every line.
+      const t = lineSummary;
+      const label = lineFiltered ? (activeLineCat === 'Dahi' ? 'Dahi' : 'Milk') : null;
+      const qtyValue = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
+      const note = (r) => [
+        r.category_inferred ? 'Category inferred from name' : '',
+        r.category_review ? 'Check name: looks like Milk/Dahi but not classified' : '',
+        r.amount_assumed ? 'Amount assumed from name' : '',
+      ].filter(Boolean).join('; ');
+
+      // Real amounts, never the raw quantity column, which mixes packs, litres and kilograms.
+      const amountColumns = !lineData ? [] : lineFiltered
+        ? [{ header: `Amount (${lineUnit})`, width: 12, type: 'money', value: r => qtyValue(r.amount), total: () => qtyValue(t.quantity) }]
+        : [
+          { header: 'Milk (L)',  width: 10, type: 'money', value: r => (r.category_group === 'Milk' ? qtyValue(r.amount) : 0), total: () => qtyValue(t.milkLitres) },
+          { header: 'Dahi (kg)', width: 10, type: 'money', value: r => (r.category_group === 'Dahi' ? qtyValue(r.amount) : 0), total: () => qtyValue(t.dahiKg) },
+        ];
 
       return {
-        name: 'Item_Sales',
-        records: lineItems,
+        name: label ? `Item_Sales_${label}` : 'Item_Sales',
+        records: lineView,
         columns: [
-          { header: 'Order #',        width: 9,  type: 'int',   value: r => r.order_id, total: () => 'TOTAL' },
+          { header: 'Order #',        width: 9,  type: 'int',   value: r => r.order_id, total: () => `TOTAL (${t.orders.toLocaleString()} orders)` },
           { header: 'Date',           width: 13, type: 'date',  value: r => excelDate(r.created_at) },
           { header: 'Time',           width: 11, type: 'text',  value: r => moment(r.created_at).format('hh:mm A') },
           { header: 'Cashier',        width: 16, type: 'text',  value: r => r.cashier_name || 'Unknown' },
           { header: 'Order Type',     width: 13, type: 'text',  value: r => r.order_type || 'Dine-in' },
           { header: 'Table/Token',    width: 13, type: 'text',  value: r => r.table_number || '' },
           { header: 'Payment Method', width: 16, type: 'text',  value: r => r.payment_method || '' },
-          { header: 'Item',           width: 34, type: 'text',  value: r => r.item_name || '' },
+          { header: 'Item',           width: 34, type: 'text',  value: r => r.item_name || '', total: () => `${t.lines.toLocaleString()} items` },
           { header: 'Category',       width: 18, type: 'text',  value: r => r.category || '' },
-          { header: 'Qty',            width: 8,  type: 'int',   value: r => Number(r.quantity) || 0, total: () => t.qty },
+          ...(lineData ? [{ header: 'Product', width: 10, type: 'text', value: r => r.category_group || '' }] : []),
+          // As sold (a pack count for Milk, kilograms or a fraction for a custom line): no total,
+          // because it cannot be added up — the amount columns beside it can.
+          { header: 'Qty (as sold)',  width: 12, type: 'money', value: r => Number(r.quantity) || 0 },
+          ...amountColumns,
           { header: 'Unit Price',     width: 12, type: 'money', value: r => money(r.unit_price) },
-          { header: 'Line Total',     width: 13, type: 'money', value: r => money(r.line_total), total: () => money(t.value) },
+          { header: 'Line Total',     width: 13, type: 'money', value: r => money(r.line_total), total: () => money(t.total) },
+          ...(lineData ? [{ header: 'Note', width: 40, type: 'text', value: note }] : []),
         ],
       };
     }
@@ -778,22 +808,22 @@ export default function Reports({ onNavigate }) {
             </div>
           </div>
 
-          {/* Detailed report: show every order, or only the Milk / Dahi (yogurt) part of them. */}
-          {reportFormat === 'detailed' && categoryData && (
-            <div className="flex items-center gap-2 mb-4 flex-wrap print:hidden" role="group" aria-label="Filter orders by product">
+          {/* Detailed and Item Sales: show everything, or only the Milk / Dahi (yogurt) part of it. */}
+          {((reportFormat === 'detailed' && categoryData) || (reportFormat === 'items' && lineData)) && (
+            <div className="flex items-center gap-2 mb-4 flex-wrap print:hidden" role="group" aria-label="Filter by product">
               <span className="text-xs font-semibold text-gray-500 mr-1">Show</span>
               {CATEGORY_FILTERS.map((f) => (
                 <button
                   key={f.key}
                   onClick={() => setCatFilter(f.key)}
-                  aria-pressed={activeCat === f.key}
+                  aria-pressed={(reportFormat === 'items' ? activeLineCat : activeCat) === f.key}
                   className={`px-4 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
-                    activeCat === f.key
+                    (reportFormat === 'items' ? activeLineCat : activeCat) === f.key
                       ? 'bg-[#1B4C82] border-[#1B4C82] text-white'
                       : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
                   }`}
                 >
-                  {f.label}
+                  {reportFormat === 'items' && f.key === 'all' ? 'All items' : f.label}
                 </button>
               ))}
             </div>
@@ -801,7 +831,7 @@ export default function Reports({ onNavigate }) {
 
           <div id="printable-area" className="w-full">
             <div className="hidden print:block mb-6 text-center">
-              <h2 className="text-xl font-bold">Sales Report{reportFormat === 'detailed' && isFiltered ? ` — ${activeCat === 'Dahi' ? 'Dahi / Yogurt' : 'Milk'} only` : ''}</h2>
+              <h2 className="text-xl font-bold">Sales Report{reportFormat === 'detailed' && isFiltered ? ` — ${productLabel(activeCat)} only` : ''}{reportFormat === 'items' && lineFiltered ? ` — ${productLabel(activeLineCat)} only` : ''}</h2>
               <p className="text-sm text-gray-500">{from} to {to}</p>
             </div>
             
@@ -855,13 +885,42 @@ export default function Reports({ onNavigate }) {
               <tbody>
                 {reportFormat === 'items' ? (
                   // Item Sales view — one row per item sold.
-                  lineItems.slice(0, TABLE_ROW_CAP).map((row, i) => (
-                    <tr key={`${row.order_id}-${i}`} className={`border-b border-gray-100 ${i % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
+                  lineView.slice(0, TABLE_ROW_CAP).map((row, i) => (
+                    <tr key={`${row.order_key ?? row.order_id}-${i}`} className={`border-b border-gray-100 ${i % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
                       <td className="py-3 px-4 font-medium text-gray-900">#{row.order_id}</td>
                       <td className="py-3 px-4 text-gray-500 text-xs">{moment(row.created_at).format('MMM D, hh:mm A')}</td>
-                      <td className="py-3 px-4 text-gray-700 text-xs">{row.item_name}</td>
+                      <td className="py-3 px-4 text-gray-700 text-xs">
+                        {row.item_name}
+                        {row.category_inferred && (
+                          <span
+                            className="ml-2 px-1.5 py-0.5 rounded text-[9px] font-bold bg-sky-100 text-sky-700 align-middle"
+                            title={`This line has no menu category (the item was removed from the menu). It is counted as ${row.category_group} because its name matches one this app writes.`}
+                          >
+                            INFERRED
+                          </span>
+                        )}
+                        {row.category_review && (
+                          <span
+                            className="ml-2 px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 text-amber-700 align-middle"
+                            title="The name looks like Milk or Dahi, but the item has no menu category and the name is not one this app writes, so it is counted under Other. Check it."
+                          >
+                            CHECK NAME
+                          </span>
+                        )}
+                      </td>
                       <td className="py-3 px-4 text-gray-500 text-xs">{row.category}</td>
-                      <td className="py-3 px-4 text-center text-gray-600">{row.quantity}</td>
+                      <td className="py-3 px-4 text-center text-gray-600">
+                        {row.quantity}
+                        {lineData && row.category_group !== 'Other' && (
+                          // The real amount: "2 Litre" x 3 is quantity 3 but 6 litres.
+                          <div
+                            className="text-[10px] text-gray-400"
+                            title={row.amount_assumed ? 'The item name gives no size, so 1 litre / 1 kg per unit is assumed.' : undefined}
+                          >
+                            = {fmtAmountQty(row.amount)} {row.category_group === 'Milk' ? 'L' : 'kg'}{row.amount_assumed ? ' ~' : ''}
+                          </div>
+                        )}
+                      </td>
                       <td className="py-3 px-4 text-right text-gray-600">{formatMoney(row.unit_price)}</td>
                       <td className="py-3 px-4 text-right font-bold text-gray-900">{formatMoney(row.line_total)}</td>
                     </tr>
@@ -915,16 +974,76 @@ export default function Reports({ onNavigate }) {
                     </tr>
                   ))
                 )}
-                {(reportFormat === 'items' ? lineItems.length : detailedView.length) === 0 && (
+                {(reportFormat === 'items' ? lineView.length : detailedView.length) === 0 && (
                   <tr>
                     <td colSpan={reportFormat === 'items' || isFiltered ? 7 : 8} className="py-8 text-center text-gray-400">
-                      {isFiltered
-                        ? `No ${activeCat === 'Dahi' ? 'Dahi / Yogurt' : 'Milk'} orders found for this date range.`
-                        : 'No orders found for this date range.'}
+                      {reportFormat === 'items'
+                        ? (lineFiltered
+                          ? `No ${productLabel(activeLineCat)} items found for this date range.`
+                          : 'No items found for this date range.')
+                        : isFiltered
+                          ? `No ${productLabel(activeCat)} orders found for this date range.`
+                          : 'No orders found for this date range.'}
                     </td>
                   </tr>
                 )}
               </tbody>
+              {reportFormat === 'items' && lineView.length > 0 && (
+                // Summed over ALL the lines in the range, not just the rows drawn: the table is
+                // capped for speed, totals must not be. "Items" = order lines (the Detailed
+                // footer's convention); quantity is the real amount, never the raw column.
+                <tfoot>
+                  <tr className="bg-gray-50 border-t-2 border-gray-300 align-top">
+                    <td className="py-3 px-4 text-xs text-gray-700">
+                      <div className="font-bold uppercase tracking-wide text-gray-600">
+                        Total{lineFiltered ? ` - ${productLabel(activeLineCat)}` : ''}
+                      </div>
+                      <div title="Distinct orders holding these items">{lineSummary.orders.toLocaleString()} orders</div>
+                    </td>
+                    <td className="py-3 px-4" />
+                    <td className="py-3 px-4 text-xs text-gray-700" title="Item lines: one per item entered on an order">
+                      {lineSummary.lines.toLocaleString()} items
+                    </td>
+                    <td className="py-3 px-4" />
+                    <td className="py-3 px-4 text-center text-xs text-gray-700 whitespace-nowrap">
+                      {lineData && (lineFiltered ? (
+                        <span className="font-semibold">{fmtAmountQty(lineSummary.quantity)} {lineUnit}</span>
+                      ) : (
+                        // Litres and kilograms cannot be added to each other, so they sit side by side.
+                        <>
+                          <div>Milk {fmtAmountQty(lineSummary.milkLitres)} L</div>
+                          <div>Dahi {fmtAmountQty(lineSummary.dahiKg)} kg</div>
+                          {lineSummary.otherLines > 0 && <div>Other {lineSummary.otherLines.toLocaleString()} items</div>}
+                        </>
+                      ))}
+                    </td>
+                    <td className="py-3 px-4" />
+                    <td className="py-3 px-4 text-right font-bold text-gray-900 whitespace-nowrap">
+                      {formatMoney(lineSummary.total)}
+                    </td>
+                  </tr>
+                  <tr className="bg-gray-50">
+                    <td colSpan={7} className="pb-3 px-4 text-[11px] text-gray-500">
+                      <span>Item total, before discounts, delivery and tax (those belong to a whole order and are not split by product).</span>
+                      {lineData && (
+                        <span>
+                          {' '}Milk {formatMoney(lineSummary.milkValue)} + Dahi {formatMoney(lineSummary.dahiValue)}
+                          {' '}+ Other {formatMoney(lineSummary.otherValue)} = {formatMoney(lineSummary.allValue)}.
+                        </span>
+                      )}
+                      {lineSummary.inferredLines > 0 && (
+                        <span> {lineSummary.inferredLines} line{lineSummary.inferredLines === 1 ? '' : 's'} counted by name (item removed from the menu).</span>
+                      )}
+                      {lineSummary.reviewLines > 0 && (
+                        <span className="text-amber-600"> {lineSummary.reviewLines} line{lineSummary.reviewLines === 1 ? '' : 's'} look like Milk or Dahi but could not be classified and are counted under Other — see CHECK NAME.</span>
+                      )}
+                      {lineSummary.assumedLines > 0 && (
+                        <span> {lineSummary.assumedLines} amount{lineSummary.assumedLines === 1 ? '' : 's'} assumed from a name with no size (~).</span>
+                      )}
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
               {reportFormat === 'detailed' && detailedView.length > 0 && (
                 // Every figure here is summed over ALL orders in the range, not just
                 // the rows drawn above: the table is capped for speed, totals must not be.
@@ -976,10 +1095,10 @@ export default function Reports({ onNavigate }) {
               )}
             </table>
             )}
-            {reportFormat !== 'summary' && (reportFormat === 'items' ? lineItems.length : detailedView.length) > TABLE_ROW_CAP && (
+            {reportFormat !== 'summary' && (reportFormat === 'items' ? lineView.length : detailedView.length) > TABLE_ROW_CAP && (
               <p className="text-center text-xs text-gray-400 py-3 print:hidden">
                 Showing the first {TABLE_ROW_CAP.toLocaleString()} of{' '}
-                {(reportFormat === 'items' ? lineItems.length : detailedView.length).toLocaleString()} rows.
+                {(reportFormat === 'items' ? lineView.length : detailedView.length).toLocaleString()} rows.
                 Use Export below for the complete list.
               </p>
             )}
