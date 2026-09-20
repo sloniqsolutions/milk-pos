@@ -99,6 +99,14 @@ router.get('/kpi', (req, res) => {
         AND COALESCE(note, '') NOT LIKE '${RESTORED_NOTE_LIKE}'
     `).get(from, to, ...cScope.params);
 
+    // What customers are known to have paid but with no date to put it on: the restore's stand-in for
+    // history from before payments were kept one by one. It belongs to no day, so no date filter counts
+    // it — this is shown beside the card so a customer's lifetime "paid" is not a mystery next to it.
+    // Only for an administrator: a manager's card is scoped to what they took themselves.
+    const creditUndated = cScope.sql ? 0 : db.prepare(`
+      SELECT COALESCE(SUM(amount), 0) AS v FROM credit_payments WHERE COALESCE(note, '') LIKE '${RESTORED_NOTE_LIKE}'
+    `).get().v;
+
     const prevFrom = new Date(from);
     prevFrom.setDate(prevFrom.getDate() - (new Date(to) - new Date(from)) / 86400000 - 1);
     const prevTo = new Date(from);
@@ -152,6 +160,7 @@ router.get('/kpi', (req, res) => {
       revenue_trend: revenueTrend,
       orders_trend: ordersTrend,
       credit_collected: creditCollected.credit_collected,
+      credit_undated: creditUndated,
       ingredient_usage: ingredientUsage,
     });
   } catch (err) {

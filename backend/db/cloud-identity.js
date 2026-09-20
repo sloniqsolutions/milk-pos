@@ -43,6 +43,15 @@ function lookup(table, localId) {
   return getStmt.get(table, id) || null;
 }
 
+/** The local number of the row that came from `deviceId`'s number `origId` on the cloud, or null. */
+function findLocal(table, deviceId, origId) {
+  const orig = Number(origId);
+  if (!Number.isInteger(orig)) return null;
+  const row = db.prepare('SELECT local_id FROM cloud_identity WHERE tbl = ? AND device_id = ? AND orig_id = ?')
+    .get(table, String(deviceId == null ? '' : deviceId), orig);
+  return row ? row.local_id : null;
+}
+
 function remember(table, localId, deviceId, origId) {
   if (!deviceId || !Number.isInteger(Number(localId)) || !Number.isInteger(Number(origId))) return;
   putStmt.run(table, Number(localId), String(deviceId), Number(origId));
@@ -61,4 +70,4 @@ function clear() {
   clearStmt.run();
 }
 
-module.exports = { lookup, remember, forget, clear };
+module.exports = { lookup, findLocal, remember, forget, clear };

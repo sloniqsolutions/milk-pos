@@ -154,6 +154,7 @@ export default function Reports({ onNavigate }) {
         avg_order_value: kData.avg_order_value || 0,
         total_discounts: kData.total_discounts || 0,
         credit_collected: kData.credit_collected || 0,
+        credit_undated: kData.credit_undated || 0,
         ingredient_usage: Array.isArray(kData.ingredient_usage) ? kData.ingredient_usage : []
       });
       setNet(nData);
@@ -598,7 +599,9 @@ export default function Reports({ onNavigate }) {
             value={formatMoney(kpi.credit_collected)}
             icon={CreditCard}
             color="#B45309"
-            subtitle="Paid back on old credit"
+            subtitle={kpi.credit_undated > 0
+              ? `Paid back on old credit. Another ${formatMoney(kpi.credit_undated)} was paid before dates were recorded and is in no filter.`
+              : 'Paid back on old credit'}
           />
           <KpiCard
             title="Net (After Expenses)"

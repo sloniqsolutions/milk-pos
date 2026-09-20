@@ -6,6 +6,7 @@
  *   npm run simulate:fresh -- --no-ui      (till + mock cloud only; start the UI yourself)
  *   npm run simulate:fresh -- --delay=30   (make the cloud take 30s to send the history; default 12)
  *   npm run simulate:fresh -- --keep       (keep the simulated till's data from the last run)
+ *   npm run simulate:fresh -- --port=3101  (run the simulated till on another port, if 3001 is taken)
  *
  * What it does, the way the installer's first launch does:
  *   1. wipes `backend/.simulated-till/` — an EMPTY data folder (your real database is never touched);
@@ -35,8 +36,9 @@ const args = process.argv.slice(2);
 const flag = (n) => args.includes(n);
 const opt = (n, d) => { const a = args.find((x) => x.startsWith(n + '=')); return a ? a.split('=')[1] : d; };
 const DELAY_MS = Number(opt('--delay', 12)) * 1000;
-const CLOUD_PORT = 4555;
-const TILL_PORT = 3001;
+const CLOUD_PORT = Number(opt('--cloud-port', 4555));
+// The UI talks to port 3001, so that is the default. Another value is for tests that redirect the UI (see --port below).
+const TILL_PORT = Number(opt('--port', 3001));
 
 // ---------------------------------------------------------------------------------------------- the made-up branch
 const pad = (n) => String(n).padStart(2, '0');
@@ -200,7 +202,21 @@ function stopAll() { children.forEach((c) => { try { c.kill(); } catch (e) { /* 
 process.on('SIGINT', () => { stopAll(); process.exit(0); });
 process.on('SIGTERM', () => { stopAll(); process.exit(0); });
 
+// Refuse to start if another till is already answering on the port: the UI (and every check you make) would be
+// talking to THAT till, not to the simulation — which is easy to miss, since it looks like a working app.
+const portBusy = (port) => new Promise((resolve) => {
+  const s = require('net').connect({ port, host: '127.0.0.1' });
+  s.once('connect', () => { s.destroy(); resolve(true); });
+  s.once('error', () => resolve(false));
+});
+
 (async () => {
+  if (await portBusy(TILL_PORT)) {
+    console.error(`
+Port ${TILL_PORT} is already in use — probably your normal till. Stop it first (it would answer instead of the simulation),
+or run the simulation on another port:  npm run simulate:fresh -- --port=3101  (then the UI will not reach it).`);
+    process.exit(1);
+  }
   if (!flag('--keep')) fs.rmSync(DATA_DIR, { recursive: true, force: true });
   fs.mkdirSync(DATA_DIR, { recursive: true });
   await new Promise((r, j) => { cloud.once('error', j); cloud.listen(CLOUD_PORT, '127.0.0.1', r); });

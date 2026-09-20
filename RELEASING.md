@@ -15,6 +15,8 @@ cd backend
 node scripts/run-script.js test/fresh-install.js
 node scripts/run-script.js test/reports-quick.js
 node scripts/run-script.js test/credit-collected.js
+node scripts/run-script.js test/credit-filters.js
+node scripts/run-script.js test/credit-gaps.js
 ```
 
 `fresh-install.js` starts the real backend on an empty data folder, paired to a
