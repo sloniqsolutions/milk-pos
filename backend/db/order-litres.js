@@ -1,37 +1,41 @@
 const db = require('./database');
+const { unitAmount } = require('./item-quantities');
 
 /**
- * Real milk litres consumed by a set of orders — computed from the recipe
- * tied to each line's menu item/variant, not order_items.quantity itself.
+ * Real milk litres consumed by a set of orders — quantity times the litres one
+ * unit of that line stands for (db/item-quantities.js), for lines whose menu
+ * item is in the Milk category.
  *
  * Quantity alone is not litres: a "2 Litre" pack bought as quantity 1 is 2
- * real litres, and a custom "Milk (0.63 L)" line is quantity 0.63 — both are
- * only correct once multiplied by that item's Milk recipe_ingredients
- * quantity_required. Treating quantity as litres directly (the assumption
- * this file replaces) is why a credit sale of a 0.5L or 2L pack used to show
- * up as exactly 1L everywhere a customer's litres were totalled.
+ * real litres, and a custom "Milk (0.63 L)" line is quantity 0.63 and IS litres.
  *
- * Scoped to the Milk ingredient specifically — a Dahi (yogurt) line has its
- * own recipe against the Yogurt ingredient and contributes 0 here, same as
- * any other non-milk item.
+ * This used to go through the till's recipes (menu item -> Milk ingredient).
+ * That gave 0 for any Milk item without a recipe — every item that arrives from
+ * the dashboard has none (backend/sync/downlink.js) — so a customer's lifetime
+ * litres silently under-counted. Reading the line and its category is the same
+ * rule the Reports use (routes/reports.js, /detailed), so the customer screen
+ * and the reports agree. Dahi (yogurt) contributes 0 here, as before.
  */
+function litresOfLines(lines) {
+  return lines.reduce((sum, l) => sum + (Number(l.quantity) || 0) * unitAmount('Milk', l.name), 0);
+}
+
+const MILK_LINES = `
+  FROM order_items oi
+  JOIN menu_items m ON m.id = oi.menu_item_id AND oi.is_deal = 0
+  WHERE m.category = 'Milk'`;
+
 function getLitresByOrderIds(orderIds) {
   const litresByOrder = {};
   if (!orderIds || orderIds.length === 0) return litresByOrder;
 
   const placeholders = orderIds.map(() => '?').join(',');
   const rows = db.prepare(`
-    SELECT oi.order_id, SUM(oi.quantity * ri.quantity_required) as litres
-    FROM order_items oi
-    JOIN recipes r ON r.menu_item_id = oi.menu_item_id
-      AND (r.variant_id = oi.variant_id OR r.variant_id IS NULL)
-    JOIN recipe_ingredients ri ON ri.recipe_id = r.id
-    JOIN ingredients ing ON ing.id = ri.ingredient_id AND ing.name = 'Milk'
-    WHERE oi.order_id IN (${placeholders})
-    GROUP BY oi.order_id
+    SELECT oi.order_id AS order_id, oi.name AS name, oi.quantity AS quantity
+    ${MILK_LINES} AND oi.order_id IN (${placeholders})
   `).all(...orderIds);
 
-  rows.forEach(r => { litresByOrder[r.order_id] = r.litres || 0; });
+  rows.forEach((r) => { litresByOrder[r.order_id] = (litresByOrder[r.order_id] || 0) + litresOfLines([r]); });
   return litresByOrder;
 }
 
@@ -42,4 +46,16 @@ function getTotalLitres(orderIds) {
   return Object.values(byOrder).reduce((sum, l) => sum + l, 0);
 }
 
-module.exports = { getLitresByOrderIds, getTotalLitres };
+/** customer id -> lifetime litres over their completed orders, for the customer list. */
+function getLitresByCustomer() {
+  const rows = db.prepare(`
+    SELECT o.customer_id AS customer_id, oi.name AS name, oi.quantity AS quantity
+    ${MILK_LINES.replace('WHERE', 'JOIN orders o ON o.id = oi.order_id WHERE')}
+      AND o.status = 'completed' AND o.payment_method = 'Credit' AND o.customer_id IS NOT NULL
+  `).all();
+  const byCustomer = {};
+  rows.forEach((r) => { byCustomer[r.customer_id] = (byCustomer[r.customer_id] || 0) + litresOfLines([r]); });
+  return byCustomer;
+}
+
+module.exports = { getLitresByOrderIds, getTotalLitres, getLitresByCustomer };

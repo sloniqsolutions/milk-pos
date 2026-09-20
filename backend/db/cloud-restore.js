@@ -26,6 +26,7 @@ const crypto = require('crypto');
 const db = require('./database');
 const { findUniversal } = require('./menu-pricing');
 const identity = require('./cloud-identity');
+const { personKey, RESTORED_NOTE_LIKE } = require('./person-key');
 
 const ADMIN_ROLES = ['Admin', 'Owner'];
 
@@ -206,7 +207,21 @@ async function applyCloudRestore(data, options = {}) {
     // CUSTOMERS. An order links to its customer by phone number
     // (phoneToCustomerId below), never by raw local_id, so a renumbered
     // customer needs no downstream remap at all.
-    const customerIds = assignNonCollidingIds(customerRows);
+    //
+    // One customer per PERSON, not per cloud row: the cloud holds the same
+    // person once for every till (or older build) that pushed them, and copying
+    // each across is what listed "Suleman" twice. The first row of each group
+    // is kept; the rest only lend their phone spellings (so orders still find
+    // them) and their figures (see totalPaid below).
+    const customerGroups = new Map(); // personKey -> rows
+    const keptCustomerRows = [];
+    customerRows.forEach((c) => {
+      const key = personKey(c.name, c.phone) || `row:${c.device_id || ''}|${c.local_id}`;
+      if (!customerGroups.has(key)) { customerGroups.set(key, []); keptCustomerRows.push(c); }
+      customerGroups.get(key).push(c);
+    });
+    result.merged_customers = customerRows.length - keptCustomerRows.length;
+    const customerIds = assignNonCollidingIds(keptCustomerRows);
     const phoneToCustomerId = new Map();
     const insertCustomer = db.prepare(
       'INSERT INTO customers (id, name, phone, address, notes, active) VALUES (?, ?, ?, ?, ?, ?)');
@@ -218,14 +233,19 @@ async function applyCloudRestore(data, options = {}) {
     const insertRestoredPayment = db.prepare(`
       INSERT INTO credit_payments (customer_id, amount, note, created_at)
       VALUES (?, ?, ?, datetime('now', 'localtime'))`);
-    customerRows.forEach((c, i) => {
+    keptCustomerRows.forEach((c, i) => {
       const assignedId = customerIds[i];
+      const group = customerGroups.get(personKey(c.name, c.phone) || `row:${c.device_id || ''}|${c.local_id}`);
       identity.remember('customers', assignedId, c.device_id, c.local_id);
       insertCustomer.run(assignedId, text(c.name) || `Customer ${assignedId}`, text(c.phone), text(c.address),
-        text(c.notes), bit(c.active, 1));
-      if (c.phone) phoneToCustomerId.set(String(c.phone).trim(), assignedId);
-      if (num(c.total_paid) > 0) {
-        insertRestoredPayment.run(assignedId, num(c.total_paid),
+        text(c.notes), group.some((g) => bit(g.active, 1)) ? 1 : 0);
+      group.forEach((g) => { if (g.phone) phoneToCustomerId.set(String(g.phone).trim(), assignedId); });
+      // The largest figure in the group, not the sum: a second row for the same
+      // person is a re-push of the same ledger, and adding them would count what
+      // they have paid twice.
+      const totalPaid = group.reduce((m, g) => Math.max(m, num(g.total_paid)), 0);
+      if (totalPaid > 0) {
+        insertRestoredPayment.run(assignedId, totalPaid,
           'Restored from cloud backup — individual payment history before this date is not available.');
       }
     });
@@ -410,7 +430,7 @@ async function applyCloudRestore(data, options = {}) {
 
   result.restored = {
     staff: staffRows.length,
-    customers: customerRows.length,
+    customers: customerRows.length - (result.merged_customers || 0),
     orders: orderRows.length,
     shifts: shiftRows.length,
     expenses: expenseRows.length,

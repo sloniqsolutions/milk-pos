@@ -286,6 +286,11 @@ try { db.exec("ALTER TABLE orders ADD COLUMN customer_address TEXT DEFAULT NULL;
 try { db.exec("ALTER TABLE orders ADD COLUMN customer_id INTEGER DEFAULT NULL REFERENCES customers(id);"); } catch(e) {}
 
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);"); } catch(e) {}
+// One active customer per phone number. Refused at the database, not just in the
+// create route, because restores and cloud pulls insert customers too. Fails
+// (quietly, and is retried next start) while duplicates still exist — merge them
+// first with scripts/merge-duplicate-customers.js.
+try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_active_phone ON customers(phone) WHERE active = 1 AND phone IS NOT NULL AND phone != '';"); } catch(e) {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_credit_payments_customer ON credit_payments(customer_id);"); } catch(e) {}
 
 // Links a credit payment to the shift it was collected during, so cash

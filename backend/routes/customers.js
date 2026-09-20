@@ -3,8 +3,9 @@ const router = express.Router();
 const db = require('../db/database');
 const { syncUpsert } = require('../db/cloud-sync');
 const { getCustomerSummary } = require('../db/customer-summary');
-const { getLitresByOrderIds } = require('../db/order-litres');
+const { getLitresByOrderIds, getLitresByCustomer } = require('../db/order-litres');
 const { clean, toNumber } = require('../db/validate');
+const { norm } = require('../db/person-key');
 
 /**
  * Checks and normalises the fields a customer is created or edited with.
@@ -25,6 +26,12 @@ function checkCustomer(body, ignoreId) {
     }
     const twin = db.prepare('SELECT id, name FROM customers WHERE phone = ? AND active = 1 AND id != ?').get(phone, ignoreId || 0);
     if (twin) return { error: `${twin.name} already has this phone number. Open that customer instead of adding a second one.` };
+  }
+  if (!phone) {
+    // Nothing else to tell two people apart by: the same name is the same person.
+    const sameName = db.prepare("SELECT id, name FROM customers WHERE active = 1 AND id != ? AND (phone IS NULL OR phone = '')")
+      .all(ignoreId || 0).find((c) => norm(c.name) === norm(name));
+    if (sameName) return { error: `${sameName.name} is already on the customer list. Open that customer instead of adding a second one.` };
   }
   return {
     value: {
@@ -66,7 +73,7 @@ router.get('/', (req, res) => {
       SELECT
         c.id, c.name, c.phone, c.address, c.notes, c.created_at,
         COALESCE(credit_total.total, 0) - COALESCE(payment_total.total, 0) AS balance,
-        COALESCE(litre_total.litres, 0) AS total_litres
+        0 AS total_litres
       FROM customers c
       LEFT JOIN (
         SELECT customer_id, SUM(total) as total
@@ -79,23 +86,13 @@ router.get('/', (req, res) => {
         FROM credit_payments
         GROUP BY customer_id
       ) payment_total ON payment_total.customer_id = c.id
-      LEFT JOIN (
-        -- Real milk litres, not order_items.quantity itself — see
-        -- db/order-litres.js's docstring for why those differ once more than
-        -- one milk pack size exists (a "2 Litre" pack is quantity 1).
-        SELECT o.customer_id, SUM(oi.quantity * ri.quantity_required) as litres
-        FROM orders o
-        JOIN order_items oi ON oi.order_id = o.id
-        JOIN recipes r ON r.menu_item_id = oi.menu_item_id
-          AND (r.variant_id = oi.variant_id OR r.variant_id IS NULL)
-        JOIN recipe_ingredients ri ON ri.recipe_id = r.id
-        JOIN ingredients ing ON ing.id = ri.ingredient_id AND ing.name = 'Milk'
-        WHERE o.payment_method = 'Credit' AND o.status = 'completed' AND o.customer_id IS NOT NULL
-        GROUP BY o.customer_id
-      ) litre_total ON litre_total.customer_id = c.id
       ${where}
       ORDER BY ${orderBy}
     `).all(...params);
+
+    // Lifetime litres per customer — see db/order-litres.js.
+    const litres = getLitresByCustomer();
+    rows.forEach((r) => { r.total_litres = litres[r.id] || 0; });
 
     res.json(rows);
   } catch (err) {

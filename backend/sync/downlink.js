@@ -20,6 +20,7 @@ const db = require('../db/database');
 const { readCloudConfig } = require('../db/cloud-config');
 const { getJson } = require('../db/cloud-http');
 const identity = require('../db/cloud-identity');
+const { personKey } = require('../db/person-key');
 
 function getLocalVersion(key) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
@@ -346,6 +347,7 @@ function applyCustomers(snapshot) {
   const hasHistory = db.prepare(
     `SELECT 1 FROM orders WHERE customer_id = ? UNION ALL SELECT 1 FROM credit_payments WHERE customer_id = ? LIMIT 1`);
   const deleteCustomer = db.prepare('DELETE FROM customers WHERE id = ?');
+  const allLocal = db.prepare('SELECT id, name, phone FROM customers WHERE active = 1');
 
   const samePerson = (cloud, local) => local && (
     (norm(cloud.phone) !== '' && norm(cloud.phone) === norm(local.phone))
@@ -360,7 +362,14 @@ function applyCustomers(snapshot) {
         const local = findLocal.get(id);
         if (id >= CLOUD_ID_BASE) {
           if (local) updateExisting.run(c.name, c.phone, c.address, c.notes, active, id);
-          else insertNew.run(id, c.name, c.phone, c.address, c.notes, active);
+          else {
+            // A dashboard-created customer this till already has under its own
+            // number (same phone, or same name with no phone) is the same
+            // person — adding them again is what listed customers twice.
+            const key = personKey(c.name, c.phone);
+            const twin = key && allLocal.all().find((l) => personKey(l.name, l.phone) === key);
+            if (!twin) insertNew.run(id, c.name, c.phone, c.address, c.notes, active);
+          }
         } else if (samePerson(c, local)) {
           updateExisting.run(c.name, c.phone, c.address, c.notes, active, id);
         }

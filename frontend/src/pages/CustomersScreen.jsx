@@ -368,14 +368,14 @@ export default function CustomersScreen() {
                 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.4px' }}>
-                      Lifetime Litres
+                      Litres Consumed To Date
                     </div>
                     <span style={{ fontSize: 18 }}>🥛</span>
                   </div>
                   <div style={{ fontSize: 24, fontWeight: 800, color: BLUE_DARK, marginTop: 6 }}>
                     {Number(ledgerData.total_litres || 0).toFixed(1)} L
                   </div>
-                  <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>Total milk volume</div>
+                  <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>Milk bought in all past sales</div>
                 </div>
 
                 <div style={{

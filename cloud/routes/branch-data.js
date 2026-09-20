@@ -335,29 +335,66 @@ router.get('/inventory', requireUser, async (req, res) => {
 router.get('/customers', requireUser, async (req, res) => {
   const s = scope(req, 'c');
   try {
+    /*
+     * One row per PERSON. The cloud keeps a customer once per till that pushed
+     * them (and once for an older build that sent no till id), so the same
+     * person can be several rows in ONE branch. Those are collapsed first, per
+     * branch, taking the largest figure — a second row is a re-push of the same
+     * ledger, and summing it double-counted balance and payments. Only then are
+     * branches summed, which is the real case for adding up: one person served
+     * at two shops.
+     *
+     * Same person = same phone digits; with no usable phone, same name in the
+     * same branch (see backend/db/person-key.js, the till's copy of the rule).
+     */
     const rows = await db.q(`
+      WITH keyed AS (
+        SELECT c.*,
+               CASE WHEN LENGTH(REGEXP_REPLACE(COALESCE(c.phone, ''), '[^0-9]', '', 'g')) >= 7
+                    THEN 'tel:' || REGEXP_REPLACE(c.phone, '[^0-9]', '', 'g')
+                    ELSE 'name:' || c.branch_id || ':' || LOWER(BTRIM(COALESCE(c.name, '')))
+               END AS group_key
+          FROM customers c
+         WHERE 1 = 1${s.sql}
+      ), per_branch AS (
+        SELECT group_key, branch_id,
+               MAX(name)           AS name,
+               MAX(phone)          AS phone,
+               MAX(address)        AS address,
+               MAX(notes)          AS notes,
+               MAX(active)         AS active,
+               MAX(order_count)    AS order_count,
+               MAX(total_spent)    AS total_spent,
+               MIN(first_order_at) AS first_order_at,
+               MAX(last_order_at)  AS last_order_at,
+               MAX(total_credited) AS total_credited,
+               MAX(total_paid)     AS total_paid,
+               MAX(balance)        AS balance,
+               MAX(total_litres)   AS total_litres
+          FROM keyed
+         GROUP BY group_key, branch_id
+      )
       SELECT
-        COALESCE(NULLIF(c.phone, ''), 'no-phone-' || c.branch_id || '-' || c.local_id) AS group_key,
-        MAX(c.name)                      AS name,
-        MAX(c.phone)                     AS phone,
-        MAX(c.address)                   AS address,
-        MAX(c.notes)                     AS notes,
-        MAX(c.active)::int               AS active,
-        SUM(c.order_count)::int          AS order_count,
-        SUM(c.total_spent)::float8       AS total_spent,
-        MIN(c.first_order_at)            AS first_order_at,
-        MAX(c.last_order_at)             AS last_order_at,
-        SUM(c.total_credited)::float8    AS total_credited,
-        SUM(c.total_paid)::float8        AS total_paid,
-        SUM(c.balance)::float8           AS balance,
-        SUM(c.total_litres)::float8      AS total_litres,
-        COUNT(DISTINCT c.branch_id)::int AS branch_count,
+        pb.group_key,
+        MAX(pb.name)                      AS name,
+        MAX(pb.phone)                     AS phone,
+        MAX(pb.address)                   AS address,
+        MAX(pb.notes)                     AS notes,
+        MAX(pb.active)::int               AS active,
+        SUM(pb.order_count)::int          AS order_count,
+        SUM(pb.total_spent)::float8       AS total_spent,
+        MIN(pb.first_order_at)            AS first_order_at,
+        MAX(pb.last_order_at)             AS last_order_at,
+        SUM(pb.total_credited)::float8    AS total_credited,
+        SUM(pb.total_paid)::float8        AS total_paid,
+        SUM(pb.balance)::float8           AS balance,
+        SUM(pb.total_litres)::float8      AS total_litres,
+        COUNT(DISTINCT pb.branch_id)::int AS branch_count,
         STRING_AGG(DISTINCT b.name, ', ') AS branches
-      FROM customers c
-      LEFT JOIN branches b ON b.id = c.branch_id
-      WHERE 1 = 1${s.sql}
-      GROUP BY group_key
-      ORDER BY SUM(c.balance) DESC, MAX(c.last_order_at) DESC
+      FROM per_branch pb
+      LEFT JOIN branches b ON b.id = pb.branch_id
+      GROUP BY pb.group_key
+      ORDER BY SUM(pb.balance) DESC, MAX(pb.last_order_at) DESC
     `, s.params);
 
     const totals = {

@@ -7,6 +7,7 @@ const { isRealDay, localDay } = require('../db/validate');
 const { unloggedSold } = require('../db/derived-usage');
 const { unitAmount } = require('../db/item-quantities');
 const { closingLookup, withStatement } = require('../db/stock-statement');
+const { RESTORED_NOTE_LIKE } = require('../db/person-key');
 
 /**
  * Every report takes an optional from/to. An unreadable one (a typo, a
@@ -88,6 +89,10 @@ router.get('/kpi', (req, res) => {
       SELECT COALESCE(SUM(amount), 0) as credit_collected
       FROM credit_payments
       WHERE DATE(created_at) BETWEEN DATE(?) AND DATE(?)${cScope.sql}
+        -- Not the stand-in a restore writes to make a balance come out right:
+        -- it stands for payments taken elsewhere on earlier days, and counting
+        -- it here booked a customer's whole history as collected on install day.
+        AND COALESCE(note, '') NOT LIKE '${RESTORED_NOTE_LIKE}'
     `).get(from, to, ...cScope.params);
 
     const prevFrom = new Date(from);
