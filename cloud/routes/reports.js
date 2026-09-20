@@ -38,6 +38,7 @@ const db = require('../db/pg');
 
 const { localToday } = require('../db/local-date');
 const { unloggedSold, unitAmount } = require('../db/derived-usage');
+const { closingLookup, withStatement } = require('../db/stock-statement');
 const { requireUser } = require('../middleware/session');
 
 /**
@@ -238,6 +239,8 @@ router.get('/kpi', requireUser, async (req, res) => {
  * backend/routes/reports.js's own /stock-movement, same reasoning and same
  * clamp-at-zero note on closing_balance. Kept as close to the till's copy as
  * the Postgres dialect allows, same as every other route in this file.
+ * `opening_balance` and `adjustment` come from db/stock-statement.js, a copy
+ * kept identical to the till's.
  */
 router.get('/stock-movement', requireUser, async (req, res) => {
   const { from, to } = getDateRange(req);
@@ -261,26 +264,22 @@ router.get('/stock-movement', requireUser, async (req, res) => {
        GROUP BY ingredient_local_id, entry_date
        ORDER BY entry_date DESC
     `, [branchId, from]);
-    const balanceByIngredientAndDate = {};
     const deltasByIngredient = {};
     allDeltas.forEach((r) => {
       if (!deltasByIngredient[r.ingredient_id]) deltasByIngredient[r.ingredient_id] = [];
       deltasByIngredient[r.ingredient_id].push({ date: r.entry_date, delta: Number(r.delta) || 0 });
     });
+    // Stock at the end of any date, per ingredient — see db/stock-statement.js.
+    const closingFor = {};
     Object.keys(deltasByIngredient).forEach((ingredientId) => {
       const ingredient = ingredientById[ingredientId];
-      if (!ingredient) return;
-      let cumulativeAfter = 0;
-      const map = {};
-      for (const d of deltasByIngredient[ingredientId]) {
-        map[d.date] = Number(ingredient.stock) - cumulativeAfter;
-        cumulativeAfter += d.delta;
-      }
-      balanceByIngredientAndDate[ingredientId] = map;
+      if (ingredient) closingFor[ingredientId] = closingLookup(Number(ingredient.stock), deltasByIngredient[ingredientId]);
     });
     function closingBalance(ingredientId, currentStock, date) {
-      const map = balanceByIngredientAndDate[ingredientId];
-      return map && date in map ? map[date] : currentStock;
+      const lookup = closingFor[ingredientId];
+      // An ingredient with no entries from `from` onward has not moved since,
+      // so today's stock is right for every day in the range.
+      return lookup ? lookup(date) : currentStock;
     }
 
     const movement = await db.q(`
@@ -288,7 +287,8 @@ router.get('/stock-movement', requireUser, async (req, res) => {
              COALESCE(-SUM(CASE WHEN ie.type = 'sale' THEN ie.amount ELSE 0 END)::float8, 0) AS sold,
              COALESCE(SUM(CASE WHEN ie.type = 'stock' AND ie.amount > 0 THEN ie.amount ELSE 0 END)::float8, 0) AS restocked,
              COALESCE(SUM(CASE WHEN ie.type = 'yogurt_conversion' THEN ie.amount ELSE 0 END)::float8, 0) AS converted,
-             COALESCE(-SUM(CASE WHEN ie.type = 'waste' THEN ie.amount ELSE 0 END)::float8, 0) AS waste
+             COALESCE(-SUM(CASE WHEN ie.type = 'waste' THEN ie.amount ELSE 0 END)::float8, 0) AS waste,
+             COALESCE(SUM(ie.amount)::float8, 0) AS day_delta
         FROM inventory_entries ie
         JOIN ingredients i ON i.branch_id = ie.branch_id AND i.local_id = ie.ingredient_local_id
        WHERE ie.branch_id = ? AND ie.entry_date::date BETWEEN ?::date AND ?::date
@@ -315,6 +315,7 @@ router.get('/stock-movement', requireUser, async (req, res) => {
         date: r.date, ingredient_id: r.ingredient_id, name: r.name, unit: r.unit,
         sold, restocked: Number(r.restocked), converted: Number(r.converted), waste,
         waste_pct: wastePct, closing_balance: balance, days_remaining: daysRemaining,
+        day_delta: Number(r.day_delta) || 0,
       };
     });
 
@@ -343,7 +344,16 @@ router.get('/stock-movement', requireUser, async (req, res) => {
       console.error('Unlogged-usage fallback failed (figures show logged movements only):', err.message);
     }
 
-    res.json(rows);
+    // Opening and Other last, once Sold has had the unlogged sales added to it:
+    // the row then adds up exactly — see db/stock-statement.js. closing_balance
+    // is left untouched.
+    const statement = rows.map(({ day_delta: dayDelta, ...row }) => {
+      const ingredient = ingredientById[row.ingredient_id];
+      const raw = ingredient ? closingBalance(row.ingredient_id, Number(ingredient.stock), row.date) : null;
+      return withStatement(row, raw, dayDelta || 0);
+    });
+
+    res.json(statement);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
