@@ -217,6 +217,7 @@ export default function CustomersScreen() {
           <div class="stats">
             <div class="stat"><div class="label">Current Balance</div><div class="value">${formatMoney(data.balance)}</div></div>
             <div class="stat"><div class="label">Total Litres</div><div class="value">${Number(data.total_litres || 0).toFixed(1)} L</div></div>
+            <div class="stat"><div class="label">Total Dahi</div><div class="value">${Number(data.total_dahi_kg || 0).toFixed(2)} kg</div></div>
             <div class="stat"><div class="label">Total Billed</div><div class="value">${formatMoney(data.total_credited || 0)}</div></div>
             <div class="stat"><div class="label">Total Paid</div><div class="value">${formatMoney(data.total_paid || 0)}</div></div>
             <div class="stat"><div class="label">Oldest Unpaid</div><div class="value">${data.days_outstanding > 0 ? data.days_outstanding + ' days' : '—'}</div></div>
@@ -376,6 +377,22 @@ export default function CustomersScreen() {
                     {Number(ledgerData.total_litres || 0).toFixed(1)} L
                   </div>
                   <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>Milk bought in all past sales</div>
+                </div>
+
+                <div style={{
+                  background: '#FFFFFF', borderRadius: 12, padding: '18px 20px',
+                  border: '1.5px solid #E5E9F0', boxShadow: '0 1px 4px rgba(0,0,0,0.04)'
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.4px' }}>
+                      Dahi Consumed To Date
+                    </div>
+                    <span style={{ fontSize: 18 }}>🥣</span>
+                  </div>
+                  <div style={{ fontSize: 24, fontWeight: 800, color: BLUE_DARK, marginTop: 6 }}>
+                    {Number(ledgerData.total_dahi_kg || 0).toFixed(2)} kg
+                  </div>
+                  <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>Dahi / yogurt bought in all past sales</div>
                 </div>
 
                 <div style={{
@@ -842,6 +859,7 @@ export default function CustomersScreen() {
                     </div>
                     <div style={{ fontSize: 12, color: '#6B7A8F', marginTop: 2 }}>
                       {Number(c.total_litres || 0).toFixed(1)} L lifetime
+                      {Number(c.total_dahi_kg || 0) > 0 ? ` · ${Number(c.total_dahi_kg).toFixed(2)} kg dahi` : ''}
                     </div>
                   </div>
                   <div style={{

@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Users, ChevronDown, Check, Delete, ChevronLeft, Loader2, Shield } from 'lucide-react';
-import { staffAPI, settingsAPI } from '../api/index';
+import { staffAPI, settingsAPI, systemAPI } from '../api/index';
 import { useAuth } from '../context/AuthContext';
 import cowLogo from '@/assets/cow-logo.png';
 
@@ -29,10 +29,37 @@ export default function LoginScreen() {
   const [loading, setLoading] = useState(true);
   const [loggingIn, setLoggingIn] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
+  // A new install's first catch-up with the cloud: 'running' / 'pending' hold sign-in, 'offline' does not.
+  const [setup, setSetup] = useState<{ state: string; seconds?: number } | null>(null);
+  const loadDataRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
+  }, []);
+
+  // Watch the first-run catch-up. While it runs, the account list on screen is the installer's
+  // placeholder, not the shop's, and anything done now could stop the restore from applying —
+  // so the screen waits, then reloads the real list the moment it lands.
+  useEffect(() => {
+    let stopped = false;
+    let wasBusy = false;
+    const poll = async () => {
+      try {
+        const health = await systemAPI.health();
+        if (stopped) return;
+        const state = health.setup?.state || 'done';
+        setSetup(health.setup || null);
+        const busy = state === 'running' || state === 'pending';
+        if (wasBusy && !busy) loadDataRef.current();
+        wasBusy = busy;
+      } catch (err) {
+        // The backend itself is still starting; try again shortly.
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 2000);
+    return () => { stopped = true; clearInterval(timer); };
   }, []);
 
   useEffect(() => {
@@ -52,6 +79,7 @@ export default function LoginScreen() {
         setLoading(false);
       }
     };
+    loadDataRef.current = loadData;
     loadData();
   }, []);
 
@@ -128,6 +156,8 @@ export default function LoginScreen() {
 
   const numpadKeys = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
+  const settingUp = setup?.state === 'running' || setup?.state === 'pending';
+
   return (
     <div style={{
       width: '100vw',
@@ -137,6 +167,27 @@ export default function LoginScreen() {
       fontFamily: 'Inter, -apple-system, sans-serif',
       background: '#FFFEF0',
     }}>
+      {settingUp && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(255,254,240,0.96)',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14,
+        }}>
+          <Loader2 size={34} color="#1B4C82" style={{ animation: 'spin 1s linear infinite' }} />
+          <div style={{ fontSize: 20, fontWeight: 700, color: '#1B4C82' }}>Setting up your till</div>
+          <div style={{ fontSize: 14, color: '#6B7280', maxWidth: 360, textAlign: 'center' }}>
+            Loading your staff, customers and sales from the cloud. This only happens once and can take a minute.
+          </div>
+        </div>
+      )}
+      {setup?.state === 'offline' && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, zIndex: 40, padding: '8px 16px', textAlign: 'center',
+          background: '#FEF3C7', color: '#92400E', fontSize: 13,
+        }}>
+          Could not reach the cloud yet, so your data has not loaded. You can sign in and work offline;
+          it will load by itself when the connection is back.
+        </div>
+      )}
 
       {/* ── LEFT PANEL ── */}
       <div style={{

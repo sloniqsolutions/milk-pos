@@ -38,7 +38,7 @@ router.get('/full', requireBranch, async (req, res) => {
   const branchId = req.branch.id;
 
   try {
-    const [staff, customers, ingredients, shifts, expenses, orders, orderItems, inventoryEntries] = await Promise.all([
+    const [staff, customers, ingredients, shifts, expenses, orders, orderItems, inventoryEntries, creditPayments] = await Promise.all([
       db.q('SELECT local_id, device_id, name, role, color, active, pin_hash FROM staff WHERE branch_id = ? ORDER BY local_id', [branchId]),
       db.q(`SELECT local_id, device_id, name, phone, address, notes, active, order_count, total_spent,
                    first_order_at, last_order_at, total_credited, total_paid, balance, total_litres
@@ -72,6 +72,13 @@ router.get('/full', requireBranch, async (req, res) => {
       // restore that brings orders back without them leaves both empty.
       db.q(`SELECT local_id, device_id, ingredient_local_id, type, amount, entry_date, created_at, received_at
               FROM inventory_entries WHERE branch_id = ? ORDER BY received_at ASC`, [branchId]),
+      // Each credit payment on its own, with its own date. Without them a
+      // restored till knows only what a customer has paid IN TOTAL, so its
+      // "credit collected" card read 0 on every date filter — the payments were
+      // real, the till just had no day to put them on.
+      db.q(`SELECT local_id, device_id, customer_local_id, local_shift_id, amount, note, received_by,
+                   created_at, received_at
+              FROM credit_payments WHERE branch_id = ? ORDER BY received_at ASC`, [branchId]),
     ]);
 
     res.json({
@@ -85,10 +92,42 @@ router.get('/full', requireBranch, async (req, res) => {
       orders,
       order_items: orderItems,
       inventory_entries: inventoryEntries,
+      credit_payments: creditPayments,
     });
   } catch (err) {
     console.error('Restore export failed:', err.message);
     res.status(500).json({ error: 'Could not read branch data.' });
+  }
+});
+
+/**
+ * GET /api/restore/credit-payments?after=<received_at>
+ *
+ * The credit payments a branch's tills have pushed since `after`, and who they were
+ * for — so a till can catch up on payments taken elsewhere (or that its own restore
+ * could not itemise) without re-restoring everything. A payment never changes once
+ * recorded, so an incrementing cursor is enough: `next_after` is what to ask for next.
+ */
+router.get('/credit-payments', requireBranch, async (req, res) => {
+  const branchId = req.branch.id;
+  const after = Number(req.query.after) || 0;
+  try {
+    const payments = await db.q(`
+      SELECT local_id, device_id, customer_local_id, amount, note, received_by, created_at, received_at
+        FROM credit_payments
+       WHERE branch_id = ? AND received_at > ?
+       ORDER BY received_at ASC LIMIT 5000`, [branchId, after]);
+    // Who each payment was for, by name/phone as well as number: numbers are per till.
+    const customers = payments.length
+      ? await db.q('SELECT local_id, device_id, name, phone, total_paid FROM customers WHERE branch_id = ?', [branchId])
+      : [];
+    res.json({
+      payments, customers,
+      next_after: payments.length ? Math.max(...payments.map((p) => Number(p.received_at) || 0)) : after,
+    });
+  } catch (err) {
+    console.error('Credit payments export failed:', err.message);
+    res.status(500).json({ error: 'Could not read credit payments.' });
   }
 });
 

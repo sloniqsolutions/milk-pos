@@ -171,6 +171,15 @@ export const reportsAPI = {
   stockMovement: (params: ReportParams) => request<Record<string, unknown>[]>('GET', `/reports/stock-movement?${new URLSearchParams(params as Record<string, string>).toString()}`),
 };
 
+/**
+ * The backend's own status. `setup` says whether a new install is still catching up
+ * with its branch's data from the cloud (backend/sync/bootstrap.js), which the sign-in
+ * screen waits for rather than letting someone in half way through it.
+ */
+export const systemAPI = {
+  health: () => request<{ status: string; setup?: { state: string; seconds?: number } }>('GET', '/health'),
+};
+
 export const settingsAPI = {
   getAll: () => request<Settings>('GET', '/settings'),
   update: (data: Settings) => request<Settings>('PUT', '/settings', data),

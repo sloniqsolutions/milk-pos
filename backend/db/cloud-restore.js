@@ -26,7 +26,7 @@ const crypto = require('crypto');
 const db = require('./database');
 const { findUniversal } = require('./menu-pricing');
 const identity = require('./cloud-identity');
-const { personKey, RESTORED_NOTE_LIKE } = require('./person-key');
+const { personKey, norm } = require('./person-key');
 
 const ADMIN_ROLES = ['Admin', 'Owner'];
 
@@ -86,15 +86,19 @@ class NotFreshError extends Error {
 }
 
 /**
- * True while nothing has ever been recorded on this device: no sale, shift,
- * expense, customer or stock movement, and at most the single default admin.
- * That — and only that — is the state in which replacing everything with the
- * branch's history can't cost anyone anything.
+ * True while nothing has ever been recorded on this device: no sale, expense,
+ * customer or stock movement, and at most the single default admin. That — and
+ * only that — is the state in which replacing everything with the branch's
+ * history can't cost anyone anything.
+ *
+ * A shift with no sale in it does not count. Signing in on a new install can
+ * open one, and it used to make the till "not fresh" for good — so a restore
+ * that had merely been slow (or waiting for the internet) was abandoned for
+ * ever, and the shop had to press Restore by hand.
  */
 function isFreshTill() {
   const count = (table) => db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
   return count('orders') === 0
-    && count('shifts') === 0
     && count('expenses') === 0
     && count('customers') === 0
     && count('credit_payments') === 0
@@ -120,6 +124,7 @@ async function applyCloudRestore(data, options = {}) {
   const orderRows = list('orders');
   const itemRows = list('order_items');
   const entryRows = Array.isArray(data.inventory_entries) ? data.inventory_entries : null;
+  const paymentRows = list('credit_payments');
 
   // better-sqlite3 transactions run synchronously — bcrypt.hash is async,
   // so every hash has to be generated before the transaction below starts.
@@ -140,7 +145,7 @@ async function applyCloudRestore(data, options = {}) {
   const fallbackAdminHash = await bcrypt.hash('1234', 10);
 
   const result = {
-    skipped: { staff: 0, orders: 0, order_items: 0, expenses: 0, inventory_entries: 0 },
+    skipped: { staff: 0, orders: 0, order_items: 0, expenses: 0, inventory_entries: 0, credit_payments: 0 },
     needs_pin_reset: [],
     kept_local_admin: null,
   };
@@ -184,6 +189,8 @@ async function applyCloudRestore(data, options = {}) {
       if (placeholder) result.needs_pin_reset.push(name);
       else if (active && ADMIN_ROLES.includes(role)) realAdminIds.push(assignedId);
     });
+    const staffIdByName = new Map(); // a payment on the cloud carries only the receiver's NAME
+    staffRows.forEach((s, i) => { const n = norm(s.name); if (n && !staffIdByName.has(n)) staffIdByName.set(n, staffIds[i]); });
     const resolveStaffId = (originalId) => (originalId == null ? null : (staffIdByOriginal.get(originalId) ?? null));
 
     // No administrator with a PIN anyone knows? Put back the ones this device
@@ -204,8 +211,8 @@ async function applyCloudRestore(data, options = {}) {
       }
     }
 
-    // CUSTOMERS. An order links to its customer by phone number
-    // (phoneToCustomerId below), never by raw local_id, so a renumbered
+    // CUSTOMERS. An order links to its customer by phone digits or, with no phone,
+    // by name (customerIdByPerson below), never by raw local_id, so a renumbered
     // customer needs no downstream remap at all.
     //
     // One customer per PERSON, not per cloud row: the cloud holds the same
@@ -222,14 +229,21 @@ async function applyCloudRestore(data, options = {}) {
     });
     result.merged_customers = customerRows.length - keptCustomerRows.length;
     const customerIds = assignNonCollidingIds(keptCustomerRows);
-    const phoneToCustomerId = new Map();
+    // How the rest of the restore finds the customer a row belongs to:
+    //   customerIdByPerson  an order's customer, by phone or (no phone) name
+    //   customerIdByKey     a payment's customer, by the till and number that pushed it
+    //   customerIdByCloudNo a dashboard-numbered customer (10000+), the same on every till
+    const customerIdByPerson = new Map();
+    const customerIdByKey = new Map();
+    const customerIdByCloudNo = new Map();
+    const paidByCustomer = []; // { id, totalPaid } — reconciled once the payments are in
     const insertCustomer = db.prepare(
       'INSERT INTO customers (id, name, phone, address, notes, active) VALUES (?, ?, ?, ?, ?, ?)');
-    // The till derives a customer's balance live from orders and
-    // credit_payments rather than storing it (see db/customer-summary.js),
-    // but individual payments were never sent to the cloud — only the running
-    // total_paid. One synthetic payment per customer makes the balance come
-    // out matching the cloud's last-known figure.
+    // The till derives a customer's balance live from orders and credit_payments
+    // rather than storing it (see db/customer-summary.js). The cloud now sends
+    // each payment (below); a stand-in for whatever the cloud's running total
+    // paid still exceeds them keeps the balance matching its last-known figure
+    // — that is all a cloud from before per-payment history can offer.
     const insertRestoredPayment = db.prepare(`
       INSERT INTO credit_payments (customer_id, amount, note, created_at)
       VALUES (?, ?, ?, datetime('now', 'localtime'))`);
@@ -239,15 +253,19 @@ async function applyCloudRestore(data, options = {}) {
       identity.remember('customers', assignedId, c.device_id, c.local_id);
       insertCustomer.run(assignedId, text(c.name) || `Customer ${assignedId}`, text(c.phone), text(c.address),
         text(c.notes), group.some((g) => bit(g.active, 1)) ? 1 : 0);
-      group.forEach((g) => { if (g.phone) phoneToCustomerId.set(String(g.phone).trim(), assignedId); });
+      const key = personKey(c.name, c.phone);
+      if (key) customerIdByPerson.set(key, assignedId);
+      group.forEach((g) => {
+        // Every spelling the group's rows use, so an order rung up with any of them still finds this customer.
+        const gk = personKey(g.name, g.phone);
+        if (gk && !customerIdByPerson.has(gk)) customerIdByPerson.set(gk, assignedId);
+        customerIdByKey.set(`${g.device_id || ''}|${g.local_id}`, assignedId);
+        if (Number(g.local_id) >= 10000) customerIdByCloudNo.set(Number(g.local_id), assignedId);
+      });
       // The largest figure in the group, not the sum: a second row for the same
       // person is a re-push of the same ledger, and adding them would count what
       // they have paid twice.
-      const totalPaid = group.reduce((m, g) => Math.max(m, num(g.total_paid)), 0);
-      if (totalPaid > 0) {
-        insertRestoredPayment.run(assignedId, totalPaid,
-          'Restored from cloud backup — individual payment history before this date is not available.');
-      }
+      paidByCustomer.push({ id: assignedId, totalPaid: group.reduce((m, g) => Math.max(m, num(g.total_paid)), 0) });
     });
 
     // INGREDIENTS — upsert, never insert. Milk and Yogurt already exist the
@@ -335,8 +353,13 @@ async function applyCloudRestore(data, options = {}) {
       const assignedId = orderIds[i];
       orderIdByKey.set(`${o.device_id || ''}|${o.local_id}`, assignedId);
       identity.remember('orders', assignedId, o.device_id, o.local_id);
-      const customerId = o.customer_phone
-        ? phoneToCustomerId.get(String(o.customer_phone).trim()) || null
+      // Only a credit sale belongs to a customer's ledger. Matched by phone digits
+      // or, for a customer with no phone, by name: matching the raw phone text
+      // alone left "0300-1234567" and "03001234567" as two different people, and
+      // every order of a phone-less customer unlinked — so their litres, balance
+      // and history came back short.
+      const customerId = String(o.payment_method) === 'Credit'
+        ? customerIdByPerson.get(personKey(o.customer_name, o.customer_phone)) || null
         : null;
       insertOrder.run(
         assignedId, num(o.total), num(o.discount), text(o.payment_method) || 'Cash', text(o.status) || 'completed',
@@ -374,7 +397,11 @@ async function applyCloudRestore(data, options = {}) {
     const universalByCategory = new Map();
     const resolveMenuItemId = (it) => {
       const original = Math.trunc(num(it.menu_item_id));
-      if (bit(it.is_deal, 0) || !it.category) return original;
+      if (bit(it.is_deal, 0)) return original;
+      // No category means the selling till could not find this item on its own menu (it was
+      // deleted). Its number means nothing here — it can be a different item's — so it is
+      // pointed at nothing (0) rather than at a stranger whose category it would then borrow.
+      if (!it.category) return 0;
       const exact = menuByNameAndCategory.get(text(it.name), text(it.category));
       if (exact) return exact.id;
       if (!universalByCategory.has(it.category)) {
@@ -424,6 +451,47 @@ async function applyCloudRestore(data, options = {}) {
         insertEntry.run(entryIds[i], ingredientId, String(e.type), Number(e.amount), String(e.entry_date), text(e.created_at));
       });
     }
+
+    // CREDIT PAYMENTS — each one on its own, with its own date, so "credit collected"
+    // on the Reports screen has a day to put it on. Without them a restored till knew
+    // only what each customer had paid IN TOTAL, and that card read 0 on every date
+    // filter while the dashboard (which has the payments) showed the real figures.
+    //
+    // A payment names its customer by the number the pushing till gave them, and its
+    // receiver only by name. The same payment can also reach the cloud twice (a till
+    // re-pushed under a second device id), so an identical one — same customer, amount,
+    // time and receiver — is kept once.
+    const insertPayment = db.prepare(`
+      INSERT INTO credit_payments (customer_id, amount, note, received_by, received_by_id, shift_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`);
+    const seenPayments = new Set();
+    const restoredPaid = new Map(); // customer id -> what those payments add up to
+    paymentRows.forEach((p) => {
+      const customerId = customerIdByKey.get(`${p.device_id || ''}|${p.customer_local_id}`)
+        ?? (Number(p.customer_local_id) >= 10000 ? customerIdByCloudNo.get(Number(p.customer_local_id)) : undefined);
+      const amount = num(p.amount);
+      if (customerId == null || !(amount > 0)) { result.skipped.credit_payments++; return; }
+      const dedupe = `${customerId}|${amount}|${text(p.created_at)}|${norm(p.received_by)}`;
+      if (seenPayments.has(dedupe)) return;
+      seenPayments.add(dedupe);
+      const info = insertPayment.run(customerId, amount, text(p.note), text(p.received_by),
+        staffIdByName.get(norm(p.received_by)) ?? null, resolveShiftId(p.device_id, p.local_shift_id),
+        text(p.created_at) || nowLocal());
+      identity.remember('credit_payments', Number(info.lastInsertRowid), p.device_id, p.local_id);
+      restoredPaid.set(customerId, (restoredPaid.get(customerId) || 0) + amount);
+    });
+
+    // What the cloud's running total says a customer has paid, beyond the payments it
+    // could itemise (history from before payments were sent one by one, or none at all
+    // from an older cloud), becomes one stand-in so the balance still comes out right.
+    // It is marked, and the Reports leave it out of "credit collected".
+    paidByCustomer.forEach(({ id, totalPaid }) => {
+      const missing = Math.round((totalPaid - (restoredPaid.get(id) || 0)) * 100) / 100;
+      if (missing > 0) {
+        insertRestoredPayment.run(id, missing,
+          'Restored from cloud backup — individual payment history before this date is not available.');
+      }
+    });
   });
 
   run();
@@ -436,6 +504,7 @@ async function applyCloudRestore(data, options = {}) {
     expenses: expenseRows.length,
     ingredients: ingredientRows.length,
     inventory_entries: entryRows ? entryRows.length : 0,
+    credit_payments: paymentRows.length - result.skipped.credit_payments,
   };
   return result;
 }

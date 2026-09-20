@@ -15,13 +15,19 @@ const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 
+const DEFAULT_TIMEOUT_MS = 20000;
+
 /**
  * @param {Buffer|null} payload  Already-encoded bytes, or null for no body.
  * @param {object} extraHeaders  Merged in after Authorization/Content-Length,
  *   so a caller sending a non-JSON body (backup upload's gzip stream, with
  *   its own Content-Type and X-Backup-* headers) can override both.
+ * @param {number} [timeoutMs]  How long the cloud may stay silent. The default suits
+ *   the small polls and pushes; a caller that asks for a whole branch's history
+ *   (sync/bootstrap.js) must pass more — the cloud says nothing until it has
+ *   gathered all of it, and 20s was not enough once a shop had real history.
  */
-function requestRaw(method, cloudUrl, path, apiKey, payload, extraHeaders) {
+function requestRaw(method, cloudUrl, path, apiKey, payload, extraHeaders, timeoutMs = DEFAULT_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     let url;
     try {
@@ -38,7 +44,7 @@ function requestRaw(method, cloudUrl, path, apiKey, payload, extraHeaders) {
     if (payload) headers['Content-Length'] = payload.length;
     Object.assign(headers, extraHeaders);
 
-    const req = lib.request(url, { method, headers, timeout: 20000 }, (res) => {
+    const req = lib.request(url, { method, headers, timeout: timeoutMs }, (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
@@ -59,13 +65,13 @@ function requestRaw(method, cloudUrl, path, apiKey, payload, extraHeaders) {
   });
 }
 
-function request(method, cloudUrl, path, apiKey, body) {
+function request(method, cloudUrl, path, apiKey, body, timeoutMs) {
   const payload = body != null ? Buffer.from(JSON.stringify(body)) : null;
   const headers = payload ? { 'Content-Type': 'application/json' } : {};
-  return requestRaw(method, cloudUrl, path, apiKey, payload, headers);
+  return requestRaw(method, cloudUrl, path, apiKey, payload, headers, timeoutMs);
 }
 
-const getJson = (cloudUrl, path, apiKey) => request('GET', cloudUrl, path, apiKey, null);
+const getJson = (cloudUrl, path, apiKey, opts = {}) => request('GET', cloudUrl, path, apiKey, null, opts.timeoutMs);
 const postJson = (cloudUrl, path, apiKey, body) => request('POST', cloudUrl, path, apiKey, body);
 const deleteJson = (cloudUrl, path, apiKey) => request('DELETE', cloudUrl, path, apiKey, null);
 

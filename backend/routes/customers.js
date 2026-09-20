@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../db/database');
 const { syncUpsert } = require('../db/cloud-sync');
 const { getCustomerSummary } = require('../db/customer-summary');
-const { getLitresByOrderIds, getLitresByCustomer } = require('../db/order-litres');
+const { getLitresByOrderIds, getLitresByCustomer, getDahiKgByOrderIds, getDahiKgByCustomer } = require('../db/order-litres');
 const { clean, toNumber } = require('../db/validate');
 const { norm } = require('../db/person-key');
 
@@ -73,7 +73,8 @@ router.get('/', (req, res) => {
       SELECT
         c.id, c.name, c.phone, c.address, c.notes, c.created_at,
         COALESCE(credit_total.total, 0) - COALESCE(payment_total.total, 0) AS balance,
-        0 AS total_litres
+        0 AS total_litres,
+        0 AS total_dahi_kg
       FROM customers c
       LEFT JOIN (
         SELECT customer_id, SUM(total) as total
@@ -92,7 +93,8 @@ router.get('/', (req, res) => {
 
     // Lifetime litres per customer — see db/order-litres.js.
     const litres = getLitresByCustomer();
-    rows.forEach((r) => { r.total_litres = litres[r.id] || 0; });
+    const dahiKg = getDahiKgByCustomer();
+    rows.forEach((r) => { r.total_litres = litres[r.id] || 0; r.total_dahi_kg = dahiKg[r.id] || 0; });
 
     res.json(rows);
   } catch (err) {
@@ -148,17 +150,22 @@ router.get('/:id', (req, res) => {
   // alone is not litres once packs of different sizes exist (a "2 Litre" pack
   // is quantity 1, not 2).
   let totalLitres = 0;
-  const monthly = {}; // 'YYYY-MM' -> { litres, amount }
+  let totalDahiKg = 0;
+  const monthly = {}; // 'YYYY-MM' -> { litres, dahi_kg, amount }
 
   if (completedOrders.length > 0) {
     const litresByOrder = getLitresByOrderIds(completedOrders.map(o => o.id));
+    const dahiByOrder = getDahiKgByOrderIds(completedOrders.map(o => o.id));
 
     completedOrders.forEach(o => {
       const litres = litresByOrder[o.id] || 0;
+      const dahiKg = dahiByOrder[o.id] || 0;
       totalLitres += litres;
+      totalDahiKg += dahiKg;
       const monthKey = String(o.created_at).slice(0, 7); // 'YYYY-MM'
-      if (!monthly[monthKey]) monthly[monthKey] = { litres: 0, amount: 0 };
+      if (!monthly[monthKey]) monthly[monthKey] = { litres: 0, dahi_kg: 0, amount: 0 };
       monthly[monthKey].litres += litres;
+      monthly[monthKey].dahi_kg += dahiKg;
       monthly[monthKey].amount += o.total;
     });
   }
@@ -181,6 +188,7 @@ router.get('/:id', (req, res) => {
     orders: creditOrders,
     payments,
     total_litres: totalLitres,
+    total_dahi_kg: totalDahiKg,
     total_credited: totalCredited,
     total_paid: totalPaid,
     days_outstanding: daysOutstanding,

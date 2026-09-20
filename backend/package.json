@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node scripts/run-backend.js",
     "dev": "node scripts/run-backend.js --watch",
+    "simulate:fresh": "node scripts/run-script.js scripts/simulate-fresh-install.js",
     "seed:menu": "node scripts/run-script.js scripts/seed_blaze_menu.js",
     "rebuild:electron": "node scripts/rebuild-native.js",
     "postinstall": "node scripts/rebuild-native.js"

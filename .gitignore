@@ -92,3 +92,6 @@ coverage/
 .eslintcache
 
 frontend/release/
+
+# The fresh-install simulation's throwaway data (backend/scripts/simulate-fresh-install.js)
+backend/.simulated-till/

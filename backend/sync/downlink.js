@@ -538,6 +538,13 @@ async function pollOnce() {
     logPollError('Expenses', err);
   }
   try {
+    // Credit payments taken elsewhere, or that a restore could only stand in for — so
+    // "credit collected" has the real days. See sync/payments-catchup.js.
+    await require('./payments-catchup').catchUpCreditPayments();
+  } catch (err) {
+    logPollError('Credit payments', err);
+  }
+  try {
     await pollSettings(config);
   } catch (err) {
     logPollError('Settings', err);

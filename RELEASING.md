@@ -5,6 +5,27 @@ every 4 hours while it stays open. When it finds a newer version a blue banner
 appears; **Download & Install** fetches it, and it installs on the next restart
 (or straight away with **Restart & Install Now**).
 
+## Before you build an installer
+
+Run these two. They take about a minute and catch the failures a shop only finds
+after installing:
+
+```
+cd backend
+node scripts/run-script.js test/fresh-install.js
+node scripts/run-script.js test/reports-quick.js
+node scripts/run-script.js test/credit-collected.js
+```
+
+`fresh-install.js` starts the real backend on an empty data folder, paired to a
+mock cloud the way the installer pairs a new machine, and checks — with nobody
+pressing Restore — that the history loads by itself (even when the cloud is slow),
+sign-in waits for it, today's orders are there, the credit figures are right on
+every day filter, and each customer's litres, Dahi and balance add up. It exits
+non-zero on any failure; do not release until it passes.
+
+Also run `node --test frontend/test/*.test.mjs backend/test/*.test.js`.
+
 ## Cut a release
 
 1. **Bump the version** in `frontend/package.json` (`"version"`). It must be
@@ -33,7 +54,10 @@ appears; **Download & Install** fetches it, and it installs on the next restart
 Run `Pure Milk POS Setup <version>.exe` from `frontend/release/`, or from the
 release page. The app is already paired to the cloud; on first start it downloads
 the branch's staff and history (`backend/sync/bootstrap.js`), so sign in with an
-existing cloud staff PIN.
+existing cloud staff PIN. The sign-in screen shows "Setting up your till" while that
+runs (up to a couple of minutes for a shop with a long history) and holds sign-in until it
+is done. If the internet is down it says so, lets you work offline, and loads the data
+by itself when the connection returns — nobody needs to press Restore.
 
 ## Where the data lives
 

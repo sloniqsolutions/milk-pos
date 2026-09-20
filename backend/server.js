@@ -93,7 +93,9 @@ app.use('/api/expenses', requireAuth, require('./routes/expenses'));
 app.use('/api/shifts', requireAuth, require('./routes/shifts'));
 app.use('/api/reports', requireAuth, require('./routes/reports'));
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
+// `setup` lets the sign-in screen wait for a new install's first catch-up with the cloud
+// (sync/bootstrap.js) instead of letting someone sign in half way through it.
+app.get('/api/health', (req, res) => res.json({ status: 'ok', setup: require('./sync/bootstrap').status() }));
 
 // Software activation. Open, like /api/health above — this has to work
 // before a shift, a PIN or a paired cloud address exists at all. See
@@ -167,6 +169,15 @@ const server = app.listen(PORT, HOST, () => {
  * sync/bootstrap.js.
  */
 require('./sync/bootstrap').startBootstrap();
+
+// Credit orders restored from the cloud without their customer (an older restore matched
+// them too strictly) get the link back, so the customer screen's litres and balance add up.
+try {
+  const linked = require('./db/relink-credit-orders').relinkCreditOrders();
+  if (linked > 0) console.log(`Linked ${linked} credit order(s) to their customer.`);
+} catch (err) {
+  console.error('Credit order relink skipped:', err.message);
+}
 
 // Milk and Dahi items that reached this till without a recipe (from the
 // dashboard, or typed at the Menu screen) sold without moving any stock; give

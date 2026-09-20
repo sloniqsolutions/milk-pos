@@ -300,6 +300,12 @@ function lockedResponse(res, status) {
 router.post('/login', async (req, res) => {
   const { pin, staff_id } = req.body || {};
 
+  // A new install is still loading its branch's staff and history from the cloud.
+  // Signing in now would race it (and the roster on screen is not the real one yet).
+  if (require('../sync/bootstrap').holdsSignIn()) {
+    return res.status(503).json({ error: 'Setting up — loading your data from the cloud. Try again in a moment.', code: 'SETUP_IN_PROGRESS' });
+  }
+
   if (!pin || (typeof pin !== 'string' && typeof pin !== 'number')) {
     return res.status(400).json({ error: 'Enter your PIN.' });
   }
