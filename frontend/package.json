@@ -2,7 +2,7 @@
   "name": "pure-milk-pos",
   "private": true,
   "type": "module",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Pure Milk Point of Sale System",
   "author": "Pure Milk",
   "main": "electron/main.js",
