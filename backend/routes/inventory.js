@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db/database');
 const { syncUpsert } = require('../db/cloud-sync');
-const { recordEntry } = require('../db/inventory-entries');
+const { moveStock, flushEntryPushes, round6 } = require('../db/inventory-entries');
 const { clean, toNumber, checkEntryDay } = require('../db/validate');
 
 /** Largest single stock figure accepted — far beyond any real shop, small enough to catch a typo. */
@@ -47,12 +47,16 @@ router.post('/', (req, res) => {
     // pulled down a cloud-created ingredient, SQLite's own rowid allocation
     // would otherwise continue from that high-water mark instead of 1.
     const nextId = db.prepare('SELECT COALESCE(MAX(id), 0) + 1 AS id FROM ingredients WHERE id < 10000').get().id;
-    const insert = db.prepare('INSERT INTO ingredients (id, name, unit, stock, low_stock_threshold) VALUES (?, ?, ?, ?, ?)');
-    const startingStock = startStock;
-    const result = insert.run(nextId, name, unit, startingStock, startThreshold);
-    if (startingStock > 0) {
-      recordEntry(result.lastInsertRowid, 'stock', startingStock, date || today());
-    }
+    // Created at zero, then brought to its starting stock by a logged movement
+    // in the same transaction — the number is never set without an entry.
+    const create = db.transaction(() => {
+      db.prepare('INSERT INTO ingredients (id, name, unit, stock, low_stock_threshold) VALUES (?, ?, ?, 0, ?)')
+        .run(nextId, name, unit, startThreshold);
+      if (startStock > 0) moveStock(nextId, 'stock', startStock, date || today());
+    });
+    create();
+    flushEntryPushes();
+    const result = { lastInsertRowid: nextId };
     const newIngredient = db.prepare('SELECT * FROM ingredients WHERE id = ?').get(result.lastInsertRowid);
     syncUpsert('ingredients', newIngredient);
     res.status(201).json(newIngredient);
@@ -79,43 +83,39 @@ router.put('/:id/stock', (req, res) => {
     const dayProblem = checkEntryDay(date);
     if (dayProblem) return res.status(400).json({ error: dayProblem });
 
-    let newStock = ingredient.stock;
+    // Every path below moves the stock and logs the same amount, together.
+    // Adding is a restock; removing is refused if it would go below zero; a
+    // corrected count is logged as the difference, with the reason "Recount".
+    let change;
+    let reason = null;
     if (action === 'add' || action === 'subtract') {
       const delta = toNumber(amount);
       if (!(delta > 0) || delta > MAX_AMOUNT) {
         return res.status(400).json({ error: 'Enter an amount greater than zero.' });
       }
-      if (action === 'add') {
-        newStock += delta;
-      } else if (delta > ingredient.stock) {
-        // Stock can't go below zero. Refused, not silently clamped: a clamp
-        // would record a smaller movement than the person typed and hide the mistake.
+      if (action === 'subtract' && delta > ingredient.stock) {
         return res.status(400).json({
           error: `You can't remove ${delta} ${ingredient.unit} — only ${ingredient.stock} ${ingredient.unit} of ${ingredient.name} is in stock.`,
           code: 'INSUFFICIENT_STOCK',
         });
-      } else {
-        newStock -= delta;
       }
+      change = action === 'add' ? delta : -delta;
     } else if (stock !== undefined) {
-      newStock = toNumber(stock);
-      if (!(newStock >= 0) || newStock > MAX_AMOUNT) {
+      const counted = toNumber(stock);
+      if (!(counted >= 0) || counted > MAX_AMOUNT) {
         return res.status(400).json({ error: 'Stock must be zero or more.' });
       }
+      change = round6(counted - ingredient.stock);
+      reason = 'Recount';
     } else {
       return res.status(400).json({ error: 'Choose whether to add stock, remove stock, or set the count.' });
     }
 
-    const update = db.prepare('UPDATE ingredients SET stock = ? WHERE id = ?');
-    update.run(newStock, id);
-
-    // Logged as the actual change applied, not the requested amount — a
-    // subtract that got clamped at 0 should show up in history as exactly
-    // what left the stock, not the bigger number that was typed in.
-    const delta = newStock - ingredient.stock;
-    if (delta !== 0) {
-      recordEntry(id, 'stock', delta, date || today());
+    if (round6(change) !== 0) {
+      moveStock(ingredient.id, 'stock', change, date || today(), { reason });
+      flushEntryPushes();
     }
+    const newStock = db.prepare('SELECT stock FROM ingredients WHERE id = ?').get(ingredient.id).stock;
 
     syncUpsert('ingredients', { ...ingredient, stock: newStock });
     res.json({ ...ingredient, stock: newStock });
@@ -208,17 +208,14 @@ router.post('/convert-to-yogurt', (req, res) => {
     }
 
     const entryDate = date || today();
-    const newMilkStock = milk.stock - milkAmount;
-    const newYogurtStock = yogurt.stock + yogurtAmount;
+    db.transaction(() => {
+      moveStock(milk.id, 'yogurt_conversion', -milkAmount, entryDate);
+      moveStock(yogurt.id, 'yogurt_conversion', yogurtAmount, entryDate);
+    })();
+    flushEntryPushes();
 
-    const convert = db.transaction(() => {
-      db.prepare('UPDATE ingredients SET stock = ? WHERE id = ?').run(newMilkStock, milk.id);
-      db.prepare('UPDATE ingredients SET stock = ? WHERE id = ?').run(newYogurtStock, yogurt.id);
-      recordEntry(milk.id, 'yogurt_conversion', -milkAmount, entryDate);
-      recordEntry(yogurt.id, 'yogurt_conversion', yogurtAmount, entryDate);
-    });
-    convert();
-
+    const newMilkStock = db.prepare('SELECT stock FROM ingredients WHERE id = ?').get(milk.id).stock;
+    const newYogurtStock = db.prepare('SELECT stock FROM ingredients WHERE id = ?').get(yogurt.id).stock;
     syncUpsert('ingredients', { ...milk, stock: newMilkStock });
     syncUpsert('ingredients', { ...yogurt, stock: newYogurtStock });
 
@@ -258,15 +255,9 @@ router.post('/waste', (req, res) => {
         code: 'INSUFFICIENT_STOCK',
       });
     }
-    const newStock = ingredient.stock - wasteAmount;
-    const actualWaste = wasteAmount;
-    const entryDate = date || today();
-
-    const reportWaste = db.transaction(() => {
-      db.prepare('UPDATE ingredients SET stock = ? WHERE id = ?').run(newStock, ingredient.id);
-      recordEntry(ingredient.id, 'waste', -actualWaste, entryDate);
-    });
-    reportWaste();
+    moveStock(ingredient.id, 'waste', -wasteAmount, date || today());
+    flushEntryPushes();
+    const newStock = db.prepare('SELECT stock FROM ingredients WHERE id = ?').get(ingredient.id).stock;
 
     syncUpsert('ingredients', { ...ingredient, stock: newStock });
     res.json({ ...ingredient, stock: newStock });

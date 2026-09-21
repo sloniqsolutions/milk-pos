@@ -140,14 +140,16 @@ const EXPENSE_COLS = [
 // Note what is absent: the PIN, hashed or otherwise. It is of no use to the
 // dashboard, and every copy of a credential is another place it can leak from.
 const STAFF_COLS = ['name', 'role', 'color', 'active'];
-const INGREDIENT_COLS = ['name', 'unit', 'stock', 'low_stock_threshold', 'cost_per_unit'];
+// No 'stock' here: the cloud's stock is worked out from the entries it holds
+// (recomputeStock below), never taken from a number a till pushes.
+const INGREDIENT_COLS = ['name', 'unit', 'low_stock_threshold', 'cost_per_unit'];
 const CUSTOMER_COLS = [
   'name', 'phone', 'address', 'notes', 'active', 'order_count', 'total_spent',
   'first_order_at', 'last_order_at', 'total_credited', 'total_paid', 'balance',
   'total_litres',
 ];
 const CREDIT_PAYMENT_COLS = ['customer_local_id', 'local_shift_id', 'amount', 'note', 'received_by', 'created_at'];
-const INVENTORY_ENTRY_COLS = ['ingredient_local_id', 'type', 'amount', 'entry_date', 'created_at'];
+const INVENTORY_ENTRY_COLS = ['ingredient_local_id', 'type', 'amount', 'entry_date', 'created_at', 'order_local_id', 'order_item_local_id', 'reason'];
 
 const ORDER_VALUES = (r) => [
   num(r.total), num(r.discount), str(r.payment_method), str(r.status),
@@ -262,6 +264,19 @@ async function dropDeletedCustomers(client, branchId) {
 }
 
 /**
+ * The cloud's stock for each ingredient is the sum of the stock entries it
+ * holds for it — from every till — never a number a till pushed. Two tills
+ * pushing "their" stock used to leave whichever pushed last on the dashboard.
+ */
+async function recomputeStock(client, branchId) {
+  await client.query(`
+    UPDATE ingredients i
+       SET stock = COALESCE((SELECT SUM(e.amount) FROM inventory_entries e
+                              WHERE e.branch_id = i.branch_id AND e.ingredient_local_id = i.local_id), 0)
+     WHERE i.branch_id = $1`, [branchId]);
+}
+
+/**
  * Ingredients get their own handler rather than simpleIngest, because
  * `(branch_id, local_id)` alone isn't a safe key for this one table: a
  * branch can have more than one till (this shop does), and each till's
@@ -298,10 +313,11 @@ async function ingestIngredients(client, branchId, rows, receivedAt /* , deviceI
 
   const { sql, params } = buildUpsert(
     'ingredients', INGREDIENT_COLS, Array.from(remapped.values()),
-    r => [str(r.name), str(r.unit), num(r.stock), num(r.low_stock_threshold), num(r.cost_per_unit)],
+    r => [str(r.name), str(r.unit), num(r.low_stock_threshold), num(r.cost_per_unit)],
     receivedAt, branchId, null,
-    { alwaysCols: ['stock'], gateCondition: "ingredients.origin <> 'cloud'", withDevice: false });
+    { gateCondition: "ingredients.origin <> 'cloud'", withDevice: false });
   await client.query(sql, params);
+  await recomputeStock(client, branchId);
   await dropDeletedIngredients(client, branchId);
 }
 
@@ -326,9 +342,11 @@ async function ingestInventoryEntries(client, branchId, rows, receivedAt, device
   });
   const { sql, params } = buildUpsert(
     'inventory_entries', INVENTORY_ENTRY_COLS, resolved,
-    r => [num(r.ingredient_id), str(r.type), num(r.amount), str(r.entry_date), str(r.created_at)],
+    r => [num(r.ingredient_id), str(r.type), num(r.amount), str(r.entry_date), str(r.created_at),
+      num(r.order_id), num(r.order_item_id), str(r.reason)],
     receivedAt, branchId, deviceId);
   await client.query(sql, params);
+  await recomputeStock(client, branchId);
 }
 
 /** Where cloud-created rows' numbers start — see routes/customers.js's copy of this constant. */

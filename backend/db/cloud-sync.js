@@ -97,6 +97,17 @@ function groupByCloudIdentity(cloudTable, rows) {
         return item ? { ...it, id: item.orig_id } : it;
       }) };
     }
+    // A stock entry restored from another till names that till's order line by
+    // the number the cloud knows it by, not this device's renumbered one.
+    if (own && cloudTable === 'inventory_entries') {
+      const order = out.order_id != null ? identity.lookup('orders', out.order_id) : null;
+      const item = out.order_item_id != null ? identity.lookup('order_items', out.order_item_id) : null;
+      out = {
+        ...out,
+        order_id: order && order.device_id === device ? order.orig_id : null,
+        order_item_id: item && item.device_id === device ? item.orig_id : null,
+      };
+    }
     // A payment recorded here for a customer restored from elsewhere refers to
     // that customer by the number the cloud knows them by.
     if (cloudTable === 'credit_payments' && out.customer_id != null) {

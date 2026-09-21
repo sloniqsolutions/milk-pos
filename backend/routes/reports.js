@@ -4,9 +4,8 @@ const db = require('../db/database');
 
 const { isAdminRole } = require('../middleware/auth');
 const { isRealDay, localDay } = require('../db/validate');
-const { unloggedSold } = require('../db/derived-usage');
 const { unitAmount } = require('../db/item-quantities');
-const { closingLookup, withStatement } = require('../db/stock-statement');
+const { buildStatement, MOVEMENT_SUMS } = require('../db/stock-statement');
 const { RESTORED_NOTE_LIKE } = require('../db/person-key');
 const { createClassifier } = require('../db/line-classifier');
 
@@ -135,19 +134,6 @@ router.get('/kpi', (req, res) => {
        ORDER BY i.name
     `).all(from, to);
 
-    // Sales restored from a till that never logged their stock movement (an
-    // older build): supplement, never double — see db/derived-usage.js.
-    try {
-      const unlogged = unloggedSold(from, to);
-      for (const row of ingredientUsage) {
-        let extra = 0;
-        for (const [key, amount] of unlogged) if (key.endsWith('|' + row.id)) extra += amount;
-        if (extra > 0) row.used = Number(row.used) + extra;
-      }
-    } catch (err) {
-      console.error('Unlogged-usage fallback failed (figures show logged movements only):', err.message);
-    }
-
     const revenueTrend = prev.total_revenue > 0
       ? (((summary.total_revenue - prev.total_revenue) / prev.total_revenue) * 100).toFixed(1)
       : 0;
@@ -169,145 +155,32 @@ router.get('/kpi', (req, res) => {
 });
 
 /**
- * Stock movement, by day and ingredient — the Reports screen's "Summary"
- * tab's own dedicated table (and the full-screen report built from the same
- * data), reading off the same inventory_entries rows as the kpi route's
- * ingredient_usage card. `sold`/`restocked`/`converted`/`waste` are each
- * day's own totals; `closing_balance` and `days_remaining` are not — they
- * need the ingredient's full history, not just the selected range, so they
- * are computed here in JS rather than as part of the grouped SQL below.
- *
- * `opening_balance` and `adjustment` make each row add up like a statement —
- * see db/stock-statement.js. `closing_balance` is unchanged.
+ * Stock movement, by day and ingredient — the Reports screen's "Summary" tab
+ * table, read off the same inventory_entries rows as the kpi route's
+ * ingredient_usage card. Built by db/stock-statement.js (kept identical to the
+ * cloud's copy): Opening is the sum of every entry before the range, Closing
+ * the sum through the day, so each row adds up by itself.
  */
 router.get('/stock-movement', (req, res) => {
   const { from, to } = getDateRange(req);
   try {
-    const ingredients = db.prepare('SELECT id, name, unit, stock FROM ingredients ORDER BY name').all();
-    const ingredientById = {};
-    ingredients.forEach((i) => { ingredientById[i.id] = i; });
-
-    // Every day this ingredient moved from `from` onward, most recent first.
-    // Nothing before `from` is fetched — no report row ever needs a balance
-    // for a date earlier than that, so entries before it can never be "after"
-    // one that matters here.
-    //
-    // closingBalance used to rescan this whole list once per report row —
-    // fine the day this shipped, ruinous a few months in once "every day
-    // this ingredient ever moved" is thousands of rows: that's an O(rows ×
-    // history) synchronous loop with no I/O in it, which blocks Node's one
-    // event loop for the whole time it runs. Nothing else the process was
-    // serving — including totally unrelated requests like GET /settings —
-    // could get a look in until it finished, which is what actually caused
-    // a batch of live browser requests to time out. A single backward pass
-    // below computes every date's balance in one go instead.
-    const allDeltas = db.prepare(`
-      SELECT ingredient_id, entry_date, SUM(amount) AS delta
-        FROM inventory_entries
-       WHERE entry_date >= ?
-       GROUP BY ingredient_id, entry_date
-       ORDER BY entry_date DESC
-    `).all(from);
-    const deltasByIngredient = {};
-    allDeltas.forEach((r) => {
-      if (!deltasByIngredient[r.ingredient_id]) deltasByIngredient[r.ingredient_id] = [];
-      deltasByIngredient[r.ingredient_id].push({ date: r.entry_date, delta: Number(r.delta) || 0 });
-    });
-    // Stock at the end of any date, per ingredient — see db/stock-statement.js.
-    const closingFor = {};
-    Object.keys(deltasByIngredient).forEach((ingredientId) => {
-      const ingredient = ingredientById[ingredientId];
-      if (ingredient) closingFor[ingredientId] = closingLookup(Number(ingredient.stock), deltasByIngredient[ingredientId]);
-    });
-    function closingBalance(ingredientId, currentStock, date) {
-      const lookup = closingFor[ingredientId];
-      // An ingredient with no entries from `from` onward has not moved since,
-      // so today's stock is right for every day in the range.
-      return lookup ? lookup(date) : currentStock;
-    }
-
-    const movement = db.prepare(`
+    const dayRows = db.prepare(`
       SELECT ie.entry_date AS date, i.id AS ingredient_id, i.name, i.unit,
-             COALESCE(-SUM(CASE WHEN ie.type = 'sale' THEN ie.amount ELSE 0 END), 0) AS sold,
-             COALESCE(SUM(CASE WHEN ie.type = 'stock' AND ie.amount > 0 THEN ie.amount ELSE 0 END), 0) AS restocked,
-             COALESCE(SUM(CASE WHEN ie.type = 'yogurt_conversion' THEN ie.amount ELSE 0 END), 0) AS converted,
-             COALESCE(-SUM(CASE WHEN ie.type = 'waste' THEN ie.amount ELSE 0 END), 0) AS waste,
-             COALESCE(SUM(ie.amount), 0) AS day_delta
+             ${MOVEMENT_SUMS}
         FROM inventory_entries ie
         JOIN ingredients i ON i.id = ie.ingredient_id
        WHERE DATE(ie.entry_date) BETWEEN DATE(?) AND DATE(?)
        GROUP BY ie.entry_date, i.id, i.name, i.unit
-       ORDER BY ie.entry_date ASC, i.name
     `).all(from, to);
-
-    // Days-of-stock-remaining is projected off this same date range's own
-    // average daily sales — widening the range changes the projection the
-    // same way it changes every other figure on this report, rather than
-    // hiding a second, differently-scoped window behind one number.
+    const openings = {};
+    db.prepare(`
+      SELECT ingredient_id, SUM(amount) AS opening
+        FROM inventory_entries
+       WHERE DATE(entry_date) < DATE(?)
+       GROUP BY ingredient_id
+    `).all(from).forEach((r) => { openings[r.ingredient_id] = Number(r.opening) || 0; });
     const daysInRange = Math.max(1, Math.round((new Date(to) - new Date(from)) / 86400000) + 1);
-    const totalSoldByIngredient = {};
-    movement.forEach((r) => {
-      totalSoldByIngredient[r.ingredient_id] = (totalSoldByIngredient[r.ingredient_id] || 0) + Number(r.sold);
-    });
-
-    const rows = movement.map((r) => {
-      const ingredient = ingredientById[r.ingredient_id];
-      // Clamped the same way live stock itself is (routes/orders.js,
-      // routes/inventory.js both floor at 0): entries from before this shop
-      // was really trading include large round test/setup figures (a single
-      // multi-kilogram "waste" entry, for instance) that a reconstructed
-      // running balance has no way to tell apart from a real one, and that
-      // can walk the math below zero for an old date. Real stock never was
-      // negative; showing it that way would just be confusing, not honest.
-      const rawBalance = ingredient ? closingBalance(r.ingredient_id, Number(ingredient.stock), r.date) : null;
-      const balance = rawBalance != null ? Math.max(0, rawBalance) : null;
-      const sold = Number(r.sold);
-      const waste = Number(r.waste);
-      const wastePct = (sold + waste) > 0 ? (waste / (sold + waste)) * 100 : 0;
-      const avgDailySold = (totalSoldByIngredient[r.ingredient_id] || 0) / daysInRange;
-      const daysRemaining = avgDailySold > 0 && balance != null && balance > 0 ? balance / avgDailySold : null;
-      return {
-        date: r.date, ingredient_id: r.ingredient_id, name: r.name, unit: r.unit,
-        sold, restocked: Number(r.restocked), converted: Number(r.converted), waste,
-        waste_pct: wastePct, closing_balance: balance, days_remaining: daysRemaining,
-        day_delta: Number(r.day_delta) || 0,
-      };
-    });
-
-    // Days whose sales logged no movement (see db/derived-usage.js).
-    try {
-      for (const [key, amount] of unloggedSold(from, to)) {
-        const [date, idText] = key.split('|');
-        const ingredientId = Number(idText);
-        const existing = rows.find((r) => r.date === date && r.ingredient_id === ingredientId);
-        if (existing) {
-          existing.sold += amount;
-        } else {
-          const ingredient = ingredientById[ingredientId];
-          if (!ingredient) continue;
-          const raw = closingBalance(ingredientId, Number(ingredient.stock), date);
-          rows.push({
-            date, ingredient_id: ingredientId, name: ingredient.name, unit: ingredient.unit,
-            sold: amount, restocked: 0, converted: 0, waste: 0, waste_pct: 0,
-            closing_balance: Math.max(0, raw), days_remaining: null,
-          });
-        }
-      }
-      rows.sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
-    } catch (err) {
-      console.error('Unlogged-usage fallback failed (figures show logged movements only):', err.message);
-    }
-
-    // Opening and Other last, once Sold has had the unlogged sales added to it:
-    // the row then adds up exactly — see db/stock-statement.js. closing_balance
-    // is left untouched.
-    const statement = rows.map(({ day_delta: dayDelta, ...row }) => {
-      const ingredient = ingredientById[row.ingredient_id];
-      const raw = ingredient ? closingBalance(row.ingredient_id, Number(ingredient.stock), row.date) : null;
-      return withStatement(row, raw, dayDelta || 0);
-    });
-
-    res.json(statement);
+    res.json(buildStatement(dayRows, openings, daysInRange));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

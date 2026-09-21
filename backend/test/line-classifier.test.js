@@ -108,5 +108,5 @@ test('the till and cloud copies stay identical', () => {
   // Compared with comments stripped: the two copies word their comments differently.
   const fn = (src) => src.slice(src.indexOf('function unitAmount'), src.indexOf('\n}\n', src.indexOf('function unitAmount')) + 3)
     .replace(/\s*\/\/[^\n]*/g, '');
-  assert.equal(fn(read('backend/db/item-quantities.js')), fn(read('cloud/db/derived-usage.js')));
+  assert.equal(fn(read('backend/db/item-quantities.js')), fn(read('cloud/db/item-quantities.js')));
 });

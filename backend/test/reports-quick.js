@@ -148,12 +148,13 @@ const sum = (list, f) => list.reduce((s, x) => s + f(x), 0);
   const sm = (await get('/stock-movement?from=2026-09-16&to=2026-09-19')).filter((r) => r.name === 'Milk');
   let prev = null;
   for (const r of sm) {
-    const adds = near(r.opening_balance + r.restocked + r.converted - r.sold - r.waste + r.adjustment, r.closing_balance);
-    check(`${r.date}: Opening + Restocked ± Converted − Sold − Waste ± Other = Closing`, adds, `${r.opening_balance} -> ${r.closing_balance}`);
+    const adds = near(r.opening_balance + r.restocked + r.converted - r.sold - r.waste - r.removed, r.closing_balance);
+    check(`${r.date}: Opening + Restocked +/- Converted - Sold - Waste - Removed = Closing`, adds, `${r.opening_balance} -> ${r.closing_balance}`);
     if (prev) check(`${r.date}: Opening equals the previous Closing`, near(prev.closing_balance, r.opening_balance));
     prev = r;
   }
-  check('the manual removal shows up as Other, not lost', near(sm.find((r) => r.date === '2026-09-17').adjustment, -4));
+  check('the manual removal shows up as Removed', near(sm.find((r) => r.date === '2026-09-17').removed, 4));
+  check('the latest Closing is the stock counter', near(sm[sm.length - 1].closing_balance, 54));
 
   server.close();
   console.log(failures ? `\n${failures} CHECK(S) FAILED` : '\nALL CHECKS PASSED');

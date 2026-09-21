@@ -756,6 +756,12 @@ ALTER TABLE staff             ADD COLUMN IF NOT EXISTS device_id TEXT;
 ALTER TABLE customers         ADD COLUMN IF NOT EXISTS device_id TEXT;
 ALTER TABLE credit_payments   ADD COLUMN IF NOT EXISTS device_id TEXT;
 ALTER TABLE inventory_entries ADD COLUMN IF NOT EXISTS device_id TEXT;
+-- The order line a sale (or a void's return) belongs to — that till's own order
+-- and line numbers, read together with device_id — and why a stock figure was
+-- changed by hand (a corrected count is 'Recount'). Additive only.
+ALTER TABLE inventory_entries ADD COLUMN IF NOT EXISTS order_local_id INTEGER;
+ALTER TABLE inventory_entries ADD COLUMN IF NOT EXISTS order_item_local_id INTEGER;
+ALTER TABLE inventory_entries ADD COLUMN IF NOT EXISTS reason TEXT;
 
 -- Branch 1's own till — the only till that has ever pushed to this branch
 -- before device_id existed, so every pre-migration row genuinely is its

@@ -37,8 +37,8 @@ const router = express.Router();
 const db = require('../db/pg');
 
 const { localToday } = require('../db/local-date');
-const { unloggedSold, unitAmount } = require('../db/derived-usage');
-const { closingLookup, withStatement } = require('../db/stock-statement');
+const { unitAmount } = require('../db/item-quantities');
+const { buildStatement, MOVEMENT_SUMS } = require('../db/stock-statement');
 const { createClassifier } = require('../db/line-classifier');
 
 // One definition of Milk / Dahi / Other for every report — see db/line-classifier.js.
@@ -198,20 +198,6 @@ router.get('/kpi', requireUser, async (req, res) => {
        ORDER BY i.name
     `, [from, to, ingredientBranch]);
 
-    // Sales from a till that never logged their stock movement (an older build,
-    // or an item with no recipe) — see db/derived-usage.js. Supplements, never
-    // doubles: only days/devices with no logged 'sale' movement are added.
-    try {
-      const unlogged = await unloggedSold(db, ingredientBranch, from, to);
-      for (const row of ingredientUsage) {
-        let extra = 0;
-        for (const [key, amount] of unlogged) if (key.endsWith('|' + row.name)) extra += amount;
-        if (extra > 0) row.used = Number(row.used) + extra;
-      }
-    } catch (err) {
-      console.error('Unlogged-usage fallback failed (figures show logged movements only):', err.message);
-    }
-
     const revenueTrend = prev.total_revenue > 0
       ? (((summary.total_revenue - prev.total_revenue) / prev.total_revenue) * 100).toFixed(1)
       : 0;
@@ -239,125 +225,33 @@ router.get('/kpi', requireUser, async (req, res) => {
 });
 
 /**
- * Stock movement, by day and ingredient — CLOUD port of
- * backend/routes/reports.js's own /stock-movement, same reasoning and same
- * clamp-at-zero note on closing_balance. Kept as close to the till's copy as
- * the Postgres dialect allows, same as every other route in this file.
- * `opening_balance` and `adjustment` come from db/stock-statement.js, a copy
- * kept identical to the till's.
+ * Stock movement, by day and ingredient — the cloud's copy of
+ * backend/routes/reports.js's own /stock-movement. Both build the table with
+ * db/stock-statement.js (kept identical): Opening is the sum of every entry
+ * before the range, Closing the sum through the day.
  */
 router.get('/stock-movement', requireUser, async (req, res) => {
   const { from, to } = getDateRange(req);
   const branchId = (req.user && req.user.branchId) || Number(req.query.branch) || 1;
   try {
-    const ingredients = await db.q(
-      'SELECT local_id AS id, name, unit, stock FROM ingredients WHERE branch_id = ? ORDER BY name', [branchId]);
-    const ingredientById = {};
-    ingredients.forEach((i) => { ingredientById[i.id] = i; });
-
-    // Nothing before `from` is fetched — see backend/routes/reports.js's own
-    // note on why, and on the O(rows × history) nested scan this replaced:
-    // that version blocked Node's one event loop for as long as it ran, on
-    // *every* branch's request, since the cloud is one shared process —
-    // which is what actually caused a batch of live browser requests
-    // (including totally unrelated ones like GET /settings) to time out.
-    const allDeltas = await db.q(`
-      SELECT ingredient_local_id AS ingredient_id, entry_date, SUM(amount)::float8 AS delta
-        FROM inventory_entries
-       WHERE branch_id = ? AND entry_date >= ?
-       GROUP BY ingredient_local_id, entry_date
-       ORDER BY entry_date DESC
-    `, [branchId, from]);
-    const deltasByIngredient = {};
-    allDeltas.forEach((r) => {
-      if (!deltasByIngredient[r.ingredient_id]) deltasByIngredient[r.ingredient_id] = [];
-      deltasByIngredient[r.ingredient_id].push({ date: r.entry_date, delta: Number(r.delta) || 0 });
-    });
-    // Stock at the end of any date, per ingredient — see db/stock-statement.js.
-    const closingFor = {};
-    Object.keys(deltasByIngredient).forEach((ingredientId) => {
-      const ingredient = ingredientById[ingredientId];
-      if (ingredient) closingFor[ingredientId] = closingLookup(Number(ingredient.stock), deltasByIngredient[ingredientId]);
-    });
-    function closingBalance(ingredientId, currentStock, date) {
-      const lookup = closingFor[ingredientId];
-      // An ingredient with no entries from `from` onward has not moved since,
-      // so today's stock is right for every day in the range.
-      return lookup ? lookup(date) : currentStock;
-    }
-
-    const movement = await db.q(`
+    const dayRows = await db.q(`
       SELECT ie.entry_date AS date, i.local_id AS ingredient_id, i.name, i.unit,
-             COALESCE(-SUM(CASE WHEN ie.type = 'sale' THEN ie.amount ELSE 0 END)::float8, 0) AS sold,
-             COALESCE(SUM(CASE WHEN ie.type = 'stock' AND ie.amount > 0 THEN ie.amount ELSE 0 END)::float8, 0) AS restocked,
-             COALESCE(SUM(CASE WHEN ie.type = 'yogurt_conversion' THEN ie.amount ELSE 0 END)::float8, 0) AS converted,
-             COALESCE(-SUM(CASE WHEN ie.type = 'waste' THEN ie.amount ELSE 0 END)::float8, 0) AS waste,
-             COALESCE(SUM(ie.amount)::float8, 0) AS day_delta
+             ${MOVEMENT_SUMS}
         FROM inventory_entries ie
         JOIN ingredients i ON i.branch_id = ie.branch_id AND i.local_id = ie.ingredient_local_id
        WHERE ie.branch_id = ? AND ie.entry_date::date BETWEEN ?::date AND ?::date
        GROUP BY ie.entry_date, i.local_id, i.name, i.unit
-       ORDER BY ie.entry_date ASC, i.name
     `, [branchId, from, to]);
-
+    const before = await db.q(`
+      SELECT ie.ingredient_local_id AS ingredient_id, SUM(ie.amount) AS opening
+        FROM inventory_entries ie
+       WHERE ie.branch_id = ? AND ie.entry_date::date < ?::date
+       GROUP BY ie.ingredient_local_id
+    `, [branchId, from]);
+    const openings = {};
+    before.forEach((r) => { openings[r.ingredient_id] = Number(r.opening) || 0; });
     const daysInRange = Math.max(1, Math.round((new Date(to) - new Date(from)) / 86400000) + 1);
-    const totalSoldByIngredient = {};
-    movement.forEach((r) => {
-      totalSoldByIngredient[r.ingredient_id] = (totalSoldByIngredient[r.ingredient_id] || 0) + Number(r.sold);
-    });
-
-    const rows = movement.map((r) => {
-      const ingredient = ingredientById[r.ingredient_id];
-      const rawBalance = ingredient ? closingBalance(r.ingredient_id, Number(ingredient.stock), r.date) : null;
-      const balance = rawBalance != null ? Math.max(0, rawBalance) : null;
-      const sold = Number(r.sold);
-      const waste = Number(r.waste);
-      const wastePct = (sold + waste) > 0 ? (waste / (sold + waste)) * 100 : 0;
-      const avgDailySold = (totalSoldByIngredient[r.ingredient_id] || 0) / daysInRange;
-      const daysRemaining = avgDailySold > 0 && balance != null && balance > 0 ? balance / avgDailySold : null;
-      return {
-        date: r.date, ingredient_id: r.ingredient_id, name: r.name, unit: r.unit,
-        sold, restocked: Number(r.restocked), converted: Number(r.converted), waste,
-        waste_pct: wastePct, closing_balance: balance, days_remaining: daysRemaining,
-        day_delta: Number(r.day_delta) || 0,
-      };
-    });
-
-    // Days whose sales logged no movement (see db/derived-usage.js): fill their
-    // Sold figure in, creating the day's row if nothing else moved that day.
-    try {
-      const unlogged = await unloggedSold(db, branchId, from, to);
-      for (const [key, amount] of unlogged) {
-        const [date, name] = key.split('|');
-        const existing = rows.find((r) => r.date === date && r.name === name);
-        if (existing) {
-          existing.sold += amount;
-        } else {
-          const ingredient = ingredients.find((i) => i.name === name);
-          if (!ingredient) continue;
-          const raw = closingBalance(ingredient.id, Number(ingredient.stock), date);
-          rows.push({
-            date, ingredient_id: ingredient.id, name, unit: ingredient.unit,
-            sold: amount, restocked: 0, converted: 0, waste: 0, waste_pct: 0,
-            closing_balance: Math.max(0, raw), days_remaining: null,
-          });
-        }
-      }
-      rows.sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
-    } catch (err) {
-      console.error('Unlogged-usage fallback failed (figures show logged movements only):', err.message);
-    }
-
-    // Opening and Other last, once Sold has had the unlogged sales added to it:
-    // the row then adds up exactly — see db/stock-statement.js. closing_balance
-    // is left untouched.
-    const statement = rows.map(({ day_delta: dayDelta, ...row }) => {
-      const ingredient = ingredientById[row.ingredient_id];
-      const raw = ingredient ? closingBalance(row.ingredient_id, Number(ingredient.stock), row.date) : null;
-      return withStatement(row, raw, dayDelta || 0);
-    });
-
-    res.json(statement);
+    res.json(buildStatement(dayRows, openings, daysInRange));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -70,7 +70,8 @@ router.get('/full', requireBranch, async (req, res) => {
       // KPI cards' Milk/Yogurt "used" figures and the Stock Movement table
       // are read straight off these rows, not re-derived from orders — so a
       // restore that brings orders back without them leaves both empty.
-      db.q(`SELECT local_id, device_id, ingredient_local_id, type, amount, entry_date, created_at, received_at
+      db.q(`SELECT local_id, device_id, ingredient_local_id, type, amount, entry_date, created_at, received_at,
+              order_local_id, order_item_local_id, reason
               FROM inventory_entries WHERE branch_id = ? ORDER BY received_at ASC`, [branchId]),
       // Each credit payment on its own, with its own date. Without them a
       // restored till knows only what a customer has paid IN TOTAL, so its

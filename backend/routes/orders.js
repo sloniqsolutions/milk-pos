@@ -4,7 +4,7 @@ const db = require('../db/database');
 const { syncUpsert, syncUpsertMany } = require('../db/cloud-sync');
 const { getCustomerSummary } = require('../db/customer-summary');
 const { buildOrderSyncPayload } = require('../db/order-sync-payload');
-const { recordEntry } = require('../db/inventory-entries');
+const { moveStock, flushEntryPushes } = require('../db/inventory-entries');
 const { toNumber } = require('../db/validate');
 
 /** Guard rails on a single sale: a typo (9999 packs) is refused before it touches stock. */
@@ -212,28 +212,28 @@ router.post('/', (req, res) => {
       'INSERT INTO order_items (order_id, menu_item_id, name, price, quantity, is_deal, variant_id) VALUES (?, ?, ?, ?, ?, ?, ?)'
     );
 
-    const deductStock = db.prepare(
-      'UPDATE ingredients SET stock = MAX(0, stock - ?) WHERE id = ?'
-    );
+    // The order's own timestamp dates every stock entry of this sale.
+    const placedAt = db.prepare('SELECT created_at FROM orders WHERE id = ?').get(orderId).created_at;
+    const placedDay = String(placedAt).slice(0, 10);
 
     items.forEach(item => {
-      insertItem.run(orderId, item.id, item.name, item.price, item.quantity, item.is_deal ? 1 : 0, item.variant_id || null);
+      const itemId = insertItem.run(orderId, item.id, item.name, item.price, item.quantity, item.is_deal ? 1 : 0, item.variant_id || null).lastInsertRowid;
 
       if (item.is_deal) return;
 
       const recipeRow = getRecipe.get(item.id, item.variant_id || null);
       if (recipeRow) {
-        const ingredients = getRecipeIngredients.all(recipeRow.id);
-        ingredients.forEach(ing => {
-          const totalQty = ing.quantity_required * item.quantity;
-          deductStock.run(totalQty, ing.ingredient_id);
-          // Logged the same way a restock/conversion/waste is (type 'sale',
-          // negative) so Reports' ingredient-used figure can be read straight
-          // off inventory_entries instead of re-deriving it from recipes —
-          // the cloud has no recipes table at all to do that join itself, see
-          // routes/reports.js's own note on why this is what makes that
-          // figure possible there too.
-          recordEntry(ing.ingredient_id, 'sale', -totalQty, today());
+        // One entry per ingredient per line: the stock taken is exactly the
+        // amount logged, for the order line it belongs to. If it would take
+        // stock below zero, moveStock refuses and the whole sale rolls back.
+        const perIngredient = new Map();
+        getRecipeIngredients.all(recipeRow.id).forEach(ing => {
+          perIngredient.set(ing.ingredient_id, (perIngredient.get(ing.ingredient_id) || 0) + ing.quantity_required * item.quantity);
+        });
+        perIngredient.forEach((totalQty, ingredientId) => {
+          moveStock(ingredientId, 'sale', -totalQty, placedDay, {
+            orderId, orderItemId: Number(itemId), createdAt: placedAt,
+          });
         });
       }
     });
@@ -243,6 +243,7 @@ router.post('/', (req, res) => {
 
   try {
     const orderId = createOrder();
+    flushEntryPushes();
 
     // Cloud sync: the order with its line items, whichever ingredients this
     // sale touched, and — for a credit sale — the customer's new balance.
@@ -280,6 +281,7 @@ router.post('/', (req, res) => {
       customer_address: (customer_address && String(customer_address).trim()) || null,
     });
   } catch (err) {
+    if (err.code === 'INSUFFICIENT_STOCK') return res.status(400).json({ error: err.message });
     console.error('Error creating order:', err);
     res.status(500).json({ error: err.message });
   }
@@ -369,7 +371,7 @@ router.get('/:id', (req, res) => {
  */
 const voidOrder = (req, res) => {
   try {
-    const order = db.prepare('SELECT id, status, payment_method, customer_id FROM orders WHERE id = ?').get(req.params.id);
+    const order = db.prepare('SELECT id, status, payment_method, customer_id, created_at FROM orders WHERE id = ?').get(req.params.id);
     if (!order) return res.status(404).json({ error: 'Order not found' });
     if (order.status === 'voided') {
       // Without this guard a second void would restock the ingredients again.
@@ -378,35 +380,44 @@ const voidOrder = (req, res) => {
 
     const doVoid = db.transaction(() => {
       const items = db.prepare(
-        'SELECT menu_item_id, quantity, is_deal, variant_id FROM order_items WHERE order_id = ?'
+        'SELECT id, menu_item_id, quantity, is_deal, variant_id FROM order_items WHERE order_id = ?'
       ).all(order.id);
 
-      // Same lookup the sale used, so the restore mirrors the deduction
-      // exactly — including variant-specific recipes.
+      // A sale that logged its own entries gives back exactly what those
+      // entries took. An older sale (before entries named their order line)
+      // is looked up the way the sale did it, from the recipe.
+      const takenByLine = db.prepare(
+        "SELECT ingredient_id, -SUM(amount) AS taken FROM inventory_entries WHERE order_item_id = ? AND type = 'sale' GROUP BY ingredient_id HAVING -SUM(amount) > 0"
+      );
       const getRecipe = db.prepare(
         'SELECT id FROM recipes WHERE menu_item_id = ? AND (variant_id = ? OR variant_id IS NULL)'
       );
       const getRecipeIngredients = db.prepare(
         'SELECT ingredient_id, quantity_required FROM recipe_ingredients WHERE recipe_id = ?'
       );
-      const restoreStock = db.prepare(
-        'UPDATE ingredients SET stock = stock + ? WHERE id = ?'
-      );
 
+      // The return is dated by the day of the sale it undoes, so that day's
+      // Sold is the sold lines only.
+      const saleDay = String(order.created_at).slice(0, 10);
       const touchedIngredientIds = new Set();
       items.forEach(item => {
         // Deals never deducted stock on the way in, so they must not add it back.
         if (item.is_deal) return;
-        const recipeRow = getRecipe.get(item.menu_item_id, item.variant_id || null);
-        if (!recipeRow) return;
-        getRecipeIngredients.all(recipeRow.id).forEach(ing => {
-          const totalQty = ing.quantity_required * item.quantity;
-          restoreStock.run(totalQty, ing.ingredient_id);
-          // Same 'sale' type as the original deduction, positive this time —
-          // summing that type over a date range nets a void out against the
-          // sale it reversed, same as it never happened.
-          recordEntry(ing.ingredient_id, 'sale', totalQty, today());
-          touchedIngredientIds.add(ing.ingredient_id);
+        let back = takenByLine.all(item.id).map(r => [r.ingredient_id, r.taken]);
+        if (back.length === 0) {
+          const recipeRow = getRecipe.get(item.menu_item_id, item.variant_id || null);
+          if (!recipeRow) return;
+          const perIngredient = new Map();
+          getRecipeIngredients.all(recipeRow.id).forEach(ing => {
+            perIngredient.set(ing.ingredient_id, (perIngredient.get(ing.ingredient_id) || 0) + ing.quantity_required * item.quantity);
+          });
+          back = [...perIngredient];
+        }
+        back.forEach(([ingredientId, qty]) => {
+          // Same 'sale' type as the deduction, positive this time — one return
+          // per line, so a day's Sold nets a void out against the sale.
+          moveStock(ingredientId, 'sale', qty, saleDay, { orderId: order.id, orderItemId: item.id });
+          touchedIngredientIds.add(ingredientId);
         });
       });
 
@@ -429,6 +440,7 @@ const voidOrder = (req, res) => {
     });
 
     const touchedIngredientIds = doVoid();
+    flushEntryPushes();
 
     // Cloud sync: the order's status changed, whichever ingredients were
     // restocked did too, and — for a voided credit sale — the balance it had

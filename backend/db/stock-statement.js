@@ -1,70 +1,86 @@
 /**
- * What makes a /reports/stock-movement row read like a bank statement:
+ * The stock table, built once. Each row is one ingredient on one day:
  *
- *   Opening + Restocked ± Converted − Sold − Waste ± Other = Closing
+ *   Opening + Restocked +/- Converted - Sold - Waste - Removed = Closing
  *
- * `closing_balance` has always been "today's stock minus every movement dated
- * after that day". The four columns beside it only show SOME of what moved —
- * Restocked is positive 'stock' entries only, so a manual removal or a
- * set-the-count correction (a negative 'stock' entry) changed the balance
- * without appearing anywhere, and a sale that never logged its movement
- * (db/derived-usage.js) is shown as Sold although it never touched the logged
- * balance. Those are what `adjustment` ("Other") holds, so the row adds up.
+ * Nothing here estimates, clamps or plugs. Opening is the sum of every stock
+ * entry before the day, Closing is the sum through the day, and each column is
+ * a plain sum of one kind of entry:
  *
- * Kept identical to cloud/db/stock-statement.js on purpose, like unitAmount,
- * so the till's Reports and the dashboard's can never disagree.
+ *   Restocked  entries of type 'stock' that are positive (stock brought in)
+ *   Removed    entries of type 'stock' that are negative (taken out by hand,
+ *              or a count corrected down), shown as a positive figure
+ *   Converted  'yogurt_conversion' entries, signed (negative for milk)
+ *   Sold       'sale' entries, negated. A void's return entry is a positive
+ *              'sale' entry, so it reduces Sold.
+ *   Waste      'waste' entries, negated
+ *
+ * If a row ever fails to add up, some entry has a type this table does not
+ * know, or a stock number was changed without an entry. That is a bug in the
+ * source, and backend/test/stock-table.test.js is what catches it.
+ *
+ * Kept identical to cloud/db/stock-statement.js on purpose, so the till's
+ * Reports and the dashboard's can never disagree.
  */
 
 const round4 = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
 
 /**
- * @param {number} stock  the ingredient's stock right now
- * @param {{date: string, delta: number}[]} deltas  one entry per day this
- *   ingredient moved, from the report's `from` onward, NEWEST first
- * @returns {(date: string) => number} the (unclamped) stock at the END of any
- *   date on or after `from`: today's stock minus everything dated after it.
- *   A day with no entries of its own gets the same answer as the last day
- *   before it that had some — it used to get today's stock instead.
+ * The per-day sums, as SQL. `ie` must be inventory_entries. Runs unchanged on
+ * SQLite (the till) and Postgres (the cloud).
  */
-function closingLookup(stock, deltas) {
-  const byDate = new Map();
-  let after = 0; // sum of every day strictly after the one about to be recorded
-  for (const d of deltas) { // already newest-first
-    byDate.set(d.date, Number(stock) - after);
-    after += d.delta;
-  }
-  return (date) => {
-    if (byDate.has(date)) return byDate.get(date);
-    // No entries that day: sum only what is dated after it. Only reached for a
-    // day that has no movement of its own, so this scan stays rare.
-    let later = 0;
-    for (const d of deltas) {
-      if (d.date <= date) break;
-      later += d.delta;
-    }
-    return Number(stock) - later;
-  };
-}
+const MOVEMENT_SUMS = `
+  COALESCE(-SUM(CASE WHEN ie.type = 'sale' THEN ie.amount ELSE 0 END), 0) AS sold,
+  COALESCE(SUM(CASE WHEN ie.type = 'stock' AND ie.amount > 0 THEN ie.amount ELSE 0 END), 0) AS restocked,
+  COALESCE(-SUM(CASE WHEN ie.type = 'stock' AND ie.amount < 0 THEN ie.amount ELSE 0 END), 0) AS removed,
+  COALESCE(SUM(CASE WHEN ie.type = 'yogurt_conversion' THEN ie.amount ELSE 0 END), 0) AS converted,
+  COALESCE(-SUM(CASE WHEN ie.type = 'waste' THEN ie.amount ELSE 0 END), 0) AS waste,
+  COALESCE(SUM(ie.amount), 0) AS day_delta`;
 
 /**
- * Adds `opening_balance` and `adjustment` to a row, leaving `closing_balance`
- * exactly as it was.
- *
- * @param {object} row  sold / restocked / converted / waste already final
- * @param {number|null} rawClosing  closingLookup's answer for this day
- * @param {number} dayDelta  the SUM of every logged entry that day, all types
- *
- * Closing is clamped at zero, as it always was (see the note in the routes).
- * Opening is clamped the same way, so one day's Closing is the next day's
- * Opening, and whatever the clamp or an unlogged sale does to the arithmetic
- * lands in `adjustment` rather than making the row wrong.
+ * @param {object[]} dayRows one per (date, ingredient) that moved in the range:
+ *   { date, ingredient_id, name, unit, sold, restocked, removed, converted, waste, day_delta }
+ * @param {Object<string, number>} openings ingredient_id -> the sum of every
+ *   entry dated before the range starts
+ * @param {number} daysInRange length of the range in days, for "stock lasts"
+ * @returns {object[]} the same rows, oldest first, with opening_balance and
+ *   closing_balance added
  */
-function withStatement(row, rawClosing, dayDelta) {
-  if (rawClosing == null) return { ...row, opening_balance: null, adjustment: 0 };
-  const closing = Math.max(0, rawClosing);
-  const opening = Math.max(0, rawClosing - dayDelta);
-  const adjustment = closing - opening - row.restocked - row.converted + row.sold + row.waste;
-  return { ...row, opening_balance: round4(opening), adjustment: round4(adjustment) };
+function buildStatement(dayRows, openings, daysInRange) {
+  const byIngredient = new Map();
+  for (const r of dayRows) {
+    if (!byIngredient.has(r.ingredient_id)) byIngredient.set(r.ingredient_id, []);
+    byIngredient.get(r.ingredient_id).push(r);
+  }
+
+  const out = [];
+  for (const [ingredientId, rows] of byIngredient) {
+    rows.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    const totalSold = rows.reduce((s, r) => s + Number(r.sold), 0);
+    const avgDailySold = totalSold / Math.max(1, daysInRange || 1);
+    let running = Number(openings && openings[ingredientId]) || 0;
+    for (const r of rows) {
+      const opening = running;
+      const closing = opening + Number(r.day_delta);
+      running = closing;
+      const sold = Number(r.sold);
+      const waste = Number(r.waste);
+      out.push({
+        date: r.date, ingredient_id: r.ingredient_id, name: r.name, unit: r.unit,
+        opening_balance: round4(opening),
+        restocked: round4(r.restocked),
+        converted: round4(r.converted),
+        sold: round4(sold),
+        waste: round4(waste),
+        removed: round4(r.removed),
+        closing_balance: round4(closing),
+        waste_pct: (sold + waste) > 0 ? (waste / (sold + waste)) * 100 : 0,
+        days_remaining: avgDailySold > 0 && closing > 0 ? closing / avgDailySold : null,
+      });
+    }
+  }
+  out.sort((a, b) => String(a.date).localeCompare(String(b.date)) || String(a.name).localeCompare(String(b.name)));
+  return out;
 }
 
-module.exports = { closingLookup, withStatement, round4 };
+module.exports = { buildStatement, MOVEMENT_SUMS, round4 };

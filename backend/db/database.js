@@ -233,6 +233,16 @@ try { db.exec("ALTER TABLE orders ADD COLUMN order_type TEXT DEFAULT 'Walk-in';"
 try { db.exec("ALTER TABLE orders ADD COLUMN delivery_charge REAL DEFAULT 0;"); } catch(e) {}
 try { db.exec("ALTER TABLE ingredients ADD COLUMN low_stock_threshold REAL DEFAULT 0;"); } catch(e) {}
 
+// A sale (or a void's return) names the exact order line it belongs to, and any
+// movement can carry a reason (a corrected count is 'Recount'). Additive only.
+try { db.exec("ALTER TABLE inventory_entries ADD COLUMN order_id INTEGER;"); } catch(e) {}
+try { db.exec("ALTER TABLE inventory_entries ADD COLUMN order_item_id INTEGER;"); } catch(e) {}
+try { db.exec("ALTER TABLE inventory_entries ADD COLUMN reason TEXT;"); } catch(e) {}
+// One sale entry per order line and ingredient, so a sale can never be logged twice.
+try {
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_inventory_entries_sale_line ON inventory_entries(order_item_id, ingredient_id) WHERE type = 'sale' AND amount < 0 AND order_item_id IS NOT NULL;");
+} catch(e) {}
+
 // FIX (Bug 5): stamp every order with the shift it belongs to, so shift
 // totals are derived from real sales instead of hardcoded numbers.
 try { db.exec("ALTER TABLE orders ADD COLUMN shift_id INTEGER DEFAULT NULL;"); } catch(e) {}

@@ -268,22 +268,24 @@ async function applyCloudRestore(data, options = {}) {
       paidByCustomer.push({ id: assignedId, totalPaid: group.reduce((m, g) => Math.max(m, num(g.total_paid)), 0) });
     });
 
-    // INGREDIENTS — upsert, never insert. Milk and Yogurt already exist the
+    // INGREDIENTS — upsert, never insert. Stock is NOT copied from the cloud's
+    // number: it is recomputed from the restored entries below, so it can only
+    // ever be the sum of what was logged. Milk and Yogurt already exist the
     // moment the app has started once, so a plain INSERT collided every time.
     // ingredients.name is UNIQUE locally but the cloud has no such
     // constraint (a stale duplicate under another local_id did once exist),
     // so a same-named row updates the existing one instead of inserting.
     const upsertIngredientById = db.prepare(`
       INSERT INTO ingredients (id, name, unit, stock, low_stock_threshold, cost_per_unit)
-      VALUES (?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, 0, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
-        name = excluded.name, unit = excluded.unit, stock = excluded.stock,
+        name = excluded.name, unit = excluded.unit,
         low_stock_threshold = excluded.low_stock_threshold, cost_per_unit = excluded.cost_per_unit
     `);
     const findIngredientByName = db.prepare('SELECT id FROM ingredients WHERE name = ?');
     const findIngredientById = db.prepare('SELECT id, name FROM ingredients WHERE id = ?');
     const updateIngredientByName = db.prepare(`
-      UPDATE ingredients SET unit = ?, stock = ?, low_stock_threshold = ?, cost_per_unit = ? WHERE name = ?`);
+      UPDATE ingredients SET unit = ?, low_stock_threshold = ?, cost_per_unit = ? WHERE name = ?`);
     // Where each cloud ingredient actually ended up locally — inventory_entries
     // (below) has to follow it there.
     const ingredientIdByOriginal = new Map();
@@ -291,12 +293,11 @@ async function applyCloudRestore(data, options = {}) {
       const name = text(i.name);
       if (!name) continue;
       const unit = text(i.unit) || 'unit';
-      const stock = Math.max(0, num(i.stock));
       const threshold = num(i.low_stock_threshold);
       const cost = num(i.cost_per_unit);
       const byName = findIngredientByName.get(name);
       if (byName) {
-        updateIngredientByName.run(unit, stock, threshold, cost, name);
+        updateIngredientByName.run(unit, threshold, cost, name);
         ingredientIdByOriginal.set(i.local_id, byName.id);
       } else {
         // The number is free, or belongs to a *differently named* ingredient
@@ -305,11 +306,11 @@ async function applyCloudRestore(data, options = {}) {
         const idTaken = findIngredientById.get(i.local_id);
         if (idTaken || !Number.isInteger(Number(i.local_id))) {
           const newId = db.prepare(
-            'INSERT INTO ingredients (name, unit, stock, low_stock_threshold, cost_per_unit) VALUES (?, ?, ?, ?, ?)')
-            .run(name, unit, stock, threshold, cost).lastInsertRowid;
+            'INSERT INTO ingredients (name, unit, stock, low_stock_threshold, cost_per_unit) VALUES (?, ?, 0, ?, ?)')
+            .run(name, unit, threshold, cost).lastInsertRowid;
           ingredientIdByOriginal.set(i.local_id, Number(newId));
         } else {
-          upsertIngredientById.run(i.local_id, name, unit, stock, threshold, cost);
+          upsertIngredientById.run(i.local_id, name, unit, threshold, cost);
           ingredientIdByOriginal.set(i.local_id, i.local_id);
         }
       }
@@ -411,10 +412,12 @@ async function applyCloudRestore(data, options = {}) {
       return universalByCategory.get(it.category) ?? original;
     };
 
+    const itemIdByKey = new Map();
     itemRows.forEach((it, i) => {
       const orderId = orderIdByKey.get(`${it.order_device_id || ''}|${it.order_local_id}`);
       if (orderId == null) { result.skipped.order_items++; return; }
       identity.remember('order_items', itemIds[i], it.order_device_id, it.local_id);
+      itemIdByKey.set(`${it.order_device_id || ''}|${it.local_id}`, itemIds[i]);
       insertItem.run(itemIds[i], orderId, resolveMenuItemId(it), text(it.name) || 'Item',
         num(it.price), num(it.quantity, 1), bit(it.is_deal, 0), it.variant_id == null ? null : Math.trunc(num(it.variant_id)));
     });
@@ -439,8 +442,8 @@ async function applyCloudRestore(data, options = {}) {
     if (entryRows) {
       const entryIds = assignNonCollidingIds(entryRows);
       const insertEntry = db.prepare(`
-        INSERT INTO inventory_entries (id, ingredient_id, type, amount, entry_date, created_at)
-        VALUES (?, ?, ?, ?, ?, COALESCE(?, datetime('now', 'localtime')))`);
+        INSERT INTO inventory_entries (id, ingredient_id, type, amount, entry_date, created_at, order_id, order_item_id, reason)
+        VALUES (?, ?, ?, ?, ?, COALESCE(?, datetime('now', 'localtime')), ?, ?, ?)`);
       entryRows.forEach((e, i) => {
         const ingredientId = ingredientIdByOriginal.get(e.ingredient_local_id);
         if (ingredientId == null || !e.type || !e.entry_date || e.amount == null || e.amount === '' || !Number.isFinite(Number(e.amount))) {
@@ -448,8 +451,16 @@ async function applyCloudRestore(data, options = {}) {
           return;
         }
         identity.remember('inventory_entries', entryIds[i], e.device_id, e.local_id);
-        insertEntry.run(entryIds[i], ingredientId, String(e.type), Number(e.amount), String(e.entry_date), text(e.created_at));
+        const orderId = e.order_local_id == null ? null : (orderIdByKey.get(`${e.device_id || ''}|${e.order_local_id}`) ?? null);
+        const itemId = e.order_item_local_id == null ? null : (itemIdByKey.get(`${e.device_id || ''}|${e.order_item_local_id}`) ?? null);
+        insertEntry.run(entryIds[i], ingredientId, String(e.type), Number(e.amount), String(e.entry_date), text(e.created_at),
+          orderId, itemId, text(e.reason));
       });
+      // Stock is what the restored entries add up to — never a number copied
+      // across. Every ingredient, so one the export did not mention is 0, not stale.
+      db.prepare(`
+        UPDATE ingredients
+           SET stock = COALESCE((SELECT SUM(amount) FROM inventory_entries WHERE ingredient_id = ingredients.id), 0)`).run();
     }
 
     // CREDIT PAYMENTS — each one on its own, with its own date, so "credit collected"
