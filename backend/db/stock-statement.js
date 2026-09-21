@@ -24,6 +24,7 @@
  */
 
 const round4 = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
+const round2 = (n) => Math.round(n * 100) / 100;
 
 /**
  * The per-day sums, as SQL. `ie` must be inventory_entries. Runs unchanged on
@@ -74,8 +75,8 @@ function buildStatement(dayRows, openings, daysInRange) {
         waste: round4(waste),
         removed: round4(r.removed),
         closing_balance: round4(closing),
-        waste_pct: (sold + waste) > 0 ? (waste / (sold + waste)) * 100 : 0,
-        days_remaining: avgDailySold > 0 && closing > 0 ? closing / avgDailySold : null,
+        waste_pct: (sold + waste) > 0 ? round2((waste / (sold + waste)) * 100) : 0,
+        days_remaining: avgDailySold > 0 && closing > 0 ? round2(closing / avgDailySold) : null,
       });
     }
   }

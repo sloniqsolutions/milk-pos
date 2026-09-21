@@ -18,6 +18,9 @@
  */
 
 const { buildStatement } = require('./stock-statement');
+const { createClassifier } = require('./line-classifier');
+const { unitAmount } = require('./item-quantities');
+const { classifyLine } = createClassifier(unitAmount);
 
 const TOLERANCE = 0.001;
 const near = (a, b) => Math.abs(a - b) <= TOLERANCE;
@@ -193,4 +196,13 @@ function tableAfter(entries) {
   return buildStatement(dayRowsOf(entries), {}, 1);
 }
 
-module.exports = { judge, createdEntryFor, tableAfter, dayRowsOf, CREATED_BASE, TOLERANCE };
+/** What one order line took from its ingredient, in that ingredient's own unit (Milk in litres, Yogurt in grams or kg). */
+const YOGURT_FACTOR = (unit) => (/^kg/i.test(String(unit || '')) ? 1 : 1000);
+
+function orderLine({ device, order, item, localOrder, localItem, created_at, status, name, quantity, category, is_deal }, yogurtFactor) {
+  const c = classifyLine({ name, category, quantity, is_deal });
+  const amount = c.group === 'Milk' ? c.amount : c.group === 'Dahi' ? c.amount * yogurtFactor : 0;
+  return { device, order, item, localOrder, localItem, day: String(created_at).slice(0, 10), created_at, status, group: c.group, name, quantity: Number(quantity), amount: Math.round(amount * 1e6) / 1e6 };
+}
+
+module.exports = { orderLine, YOGURT_FACTOR, judge, createdEntryFor, tableAfter, dayRowsOf, CREATED_BASE, TOLERANCE };
