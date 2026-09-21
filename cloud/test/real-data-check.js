@@ -105,7 +105,7 @@ function tableProblems(rows, label) {
 
   const hist = await get(cloudServer, `/api/inventory/history?branch=1&from=${FROM}&to=${TO}`);
   const corrected = hist.filter((h) => h.superseded_by != null);
-  check('the corrected entries are still in the history, each pointing at its correction', corrected.length === 54, `${corrected.length} corrected entries visible`);
+  check('no entry is left marked corrected (the wrong ones were deleted)', corrected.length === 0, `${corrected.length}`);
   check('and none of them is in any total', ['Milk', 'Yogurt'].every((name) => {
     const sum = hist.filter((h) => h.ingredient_name === name && h.superseded_by == null).reduce((s, h) => s + Number(h.amount), 0);
     return cp.last[name] && near(sum, cp.last[name].closing_balance);
@@ -157,6 +157,14 @@ function tableProblems(rows, label) {
   console.log(`  INFO  of those, Milk/Dahi-looking lines: ${nrMilkDahi.length ? JSON.stringify(nrMilkDahi) : 'none'}`);
 
   // the physical stock counters
+  const show = (rows, title) => {
+    console.log(`\n${title}: Opening | Restocked | Converted | Sold | Waste | Removed | Closing`);
+    for (const name of ['Milk', 'Yogurt']) {
+      rows.filter((r) => r.name === name).forEach((r) => console.log(`  ${name.padEnd(6)} ${r.date}  ${[r.opening_balance, r.restocked, r.converted, r.sold, r.waste, r.removed, r.closing_balance].map((v) => String(r3(v)).padStart(10)).join(' | ')}`));
+    }
+  };
+  show(cTable, 'THE TABLE ON THE DASHBOARD (real cloud)');
+  show(tTable, 'THE TABLE ON THE TILL (copy of the real till database)');
   console.log('\nTHE STOCK COUNTERS');
   for (const name of ['Milk', 'Yogurt']) {
     const c = till.prepare('SELECT stock FROM ingredients WHERE name = ?').get(name).stock;

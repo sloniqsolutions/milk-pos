@@ -13,6 +13,7 @@
  *   --apply                 do it (default is a dry run, which only reads)
  *   --backup <file.json>    write every inventory entry to a file and stop
  *   --undo <run id> --apply un-mark what an earlier run corrected, remove what it created
+ *   --hard                  demo data only: really delete the wrong entries and every ASK ME entry (nothing kept)
  *   --supersede <key,key>   also mark these ASK ME entries corrected (keys are shown in the report)
  *   --recount Milk=N,Yogurt=N   with --apply: one visible "Recount" entry so the last
  *                           Closing equals the counted stock (N = the physical count)
@@ -38,6 +39,7 @@ const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(`--${name}`);
 const opt = (name, fallback) => { const i = argv.indexOf(`--${name}`); return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : fallback; };
 const APPLY = flag('apply');
+const HARD = flag('hard'); // demo data: delete the wrong AND the unsure entries outright, no audit trail
 const MAIN = '6c927c39-72d8-40c1-b873-251871df45b4';
 const BATCH_AT = opt('batch-at', '2026-09-18 23:50:45');
 const [SUSPECT_FROM, SUSPECT_TO] = opt('suspect', '2026-09-15..2026-09-16').split('..');
@@ -94,7 +96,7 @@ function tillSource(dbPath) {
       return Boolean(findOrig(t, spec.device, spec.id)) || (spec.device === own && db.prepare(`SELECT 1 FROM ${t} WHERE id = ?`).get(spec.id) !== undefined);
     },
     backup: () => db.prepare('SELECT * FROM inventory_entries ORDER BY id').all(),
-    apply({ runId, supersede, created, recount }) {
+    apply({ runId, supersede, created, recount, hard, del }) {
       db.exec(`CREATE TABLE IF NOT EXISTS cleanup_log (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, run_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
         source TEXT, action TEXT NOT NULL, device_id TEXT, local_id INTEGER, row_json TEXT, verdict TEXT, reason TEXT)`);
       if (!hasIdentity) db.exec('CREATE TABLE IF NOT EXISTS cloud_identity (tbl TEXT NOT NULL, local_id INTEGER NOT NULL, device_id TEXT NOT NULL, orig_id INTEGER NOT NULL, PRIMARY KEY (tbl, local_id))');
@@ -115,6 +117,12 @@ function tillSource(dbPath) {
           remember.run('inventory_entries', id, c.device, c.id);
           createdLocal.set(c.key, id);
           log.run(runId, 'till', 'CREATED', c.device, id, JSON.stringify({ ...c, localId: id }), 'CREATED', `sale entry for order line #${c.item}`);
+        }
+        if (hard) {
+          for (const e of del) {
+            db.prepare('DELETE FROM inventory_entries WHERE id = ?').run(e.localId);
+            db.prepare("DELETE FROM cloud_identity WHERE tbl = 'inventory_entries' AND local_id = ?").run(e.localId);
+          }
         }
         for (const { e, verdict, reason, by } of supersede) {
           const target = by.created ? createdLocal.get(by.created.key) : by.existing.localId;
@@ -201,7 +209,7 @@ async function cloudSource() {
       return (await q(`SELECT 1 FROM ${t} WHERE branch_id = $1 AND device_id = $2 AND local_id = $3`, [BRANCH, spec.device, spec.id])).length > 0;
     },
     async backup() { return q('SELECT * FROM inventory_entries WHERE branch_id = $1 ORDER BY device_id, local_id', [BRANCH]); },
-    async apply({ runId, supersede, created, recount }) {
+    async apply({ runId, supersede, created, recount, hard, del }) {
       await client.query(`CREATE TABLE IF NOT EXISTS cleanup_log (id SERIAL PRIMARY KEY, run_id TEXT NOT NULL, run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         source TEXT, action TEXT NOT NULL, device_id TEXT, local_id INTEGER, row_json TEXT, verdict TEXT, reason TEXT)`);
       for (const c of ['order_local_id INTEGER', 'order_item_local_id INTEGER', 'reason TEXT', 'superseded_by INTEGER']) await client.query(`ALTER TABLE inventory_entries ADD COLUMN IF NOT EXISTS ${c}`);
@@ -214,6 +222,9 @@ async function cloudSource() {
       for (const c of created) {
         await insert(c.device, c.id, c.ingredient, 'sale', c.amount, c.entry_date, c.created_at, c.order, c.item, null);
         await log('CREATED', c.device, c.id, c, 'CREATED', `sale entry for order line #${c.item}`);
+      }
+      if (hard) {
+        for (const e of del) await client.query('DELETE FROM inventory_entries WHERE branch_id = $1 AND device_id = $2 AND local_id = $3', [BRANCH, e.device, e.id]);
       }
       for (const { e, verdict, reason, by } of supersede) {
         const row = (await q('SELECT * FROM inventory_entries WHERE branch_id = $1 AND device_id = $2 AND local_id = $3', [BRANCH, e.device, e.id]))[0];
@@ -270,7 +281,7 @@ async function main() {
   const result = judge({ entries, lines, batchAt: BATCH_AT, suspectFrom: SUSPECT_FROM, suspectTo: SUSPECT_TO, collisionKeys });
   const { verdicts, missing, coverOf } = result;
   const askDelete = new Set((opt('supersede', '') || '').split(',').filter(Boolean));
-  const willDelete = entries.filter((e) => verdicts.get(e.key).verdict === 'DELETE' || askDelete.has(e.key));
+  const willDelete = entries.filter((e) => verdicts.get(e.key).verdict === 'DELETE' || askDelete.has(e.key) || (HARD && verdicts.get(e.key).verdict === 'ASK ME'));
   const created = missing.map((l) => ({ ...createdEntryFor(l), localOrder: l.localOrder, localItem: l.localItem }));
   const createdByLine = new Map(created.map((c) => [`${c.device}|${c.item}`, c]));
   // Each corrected entry points at the entry that now records its order line correctly.
@@ -282,7 +293,7 @@ async function main() {
     const made = createdByLine.get(`${line.device}|${line.item}`);
     return made ? { created: made } : null; // its number is in the 9,000,000 band, so it names one entry
   };
-  const noReplacement = willDelete.filter((e) => !replacementFor(e));
+  const noReplacement = HARD ? [] : willDelete.filter((e) => !replacementFor(e));
   if (noReplacement.length) {
     console.error(`Stopped: ${noReplacement.length} entries have no entry to point at: ${noReplacement.map((e) => e.key).join(', ')}`);
     process.exit(1);
@@ -347,7 +358,7 @@ async function main() {
   }
   out();
   const asks = cands.filter((e) => verdicts.get(e.key).verdict === 'ASK ME' && !askDelete.has(e.key));
-  out(`SUMMARY: ${willDelete.length} to mark corrected (superseded), ${created.length} to create, ${asks.length} ASK ME (left exactly as they are unless you say otherwise).`);
+  out(`SUMMARY: ${willDelete.length} to ${HARD ? "delete" : "mark corrected (superseded)"}, ${created.length} to create, ${HARD ? 0 : asks.length} ASK ME left.`);
 
   if (opt('report')) fs.writeFileSync(opt('report'), lines_out.join('\n') + '\n');
 
@@ -358,10 +369,11 @@ async function main() {
   const runId = `cleanup-${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomBytes(2).toString('hex')}`;
   await src.apply({
     runId,
-    supersede: willDelete.map((e) => ({ e, verdict: askDelete.has(e.key) ? 'CORRECTED (chosen)' : 'CORRECTED', reason: verdicts.get(e.key).reason, by: replacementFor(e) })),
+    hard: HARD, del: willDelete,
+    supersede: HARD ? [] : willDelete.map((e) => ({ e, verdict: askDelete.has(e.key) ? 'CORRECTED (chosen)' : 'CORRECTED', reason: verdicts.get(e.key).reason, by: replacementFor(e) })),
     created, recount,
   });
-  out(`APPLIED as ${runId}: ${willDelete.length} marked corrected (each copied into cleanup_log, none deleted), ${created.length} created.`);
+  out(`APPLIED as ${runId}: ${HARD ? `${willDelete.length} deleted` : `${willDelete.length} marked corrected (each copied into cleanup_log, none deleted)`}, ${created.length} created.`);
   out(`To put it all back: --undo ${runId} --apply`);
   await src.close();
 }
