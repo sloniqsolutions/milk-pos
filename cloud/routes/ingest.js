@@ -149,7 +149,7 @@ const CUSTOMER_COLS = [
   'total_litres',
 ];
 const CREDIT_PAYMENT_COLS = ['customer_local_id', 'local_shift_id', 'amount', 'note', 'received_by', 'created_at'];
-const INVENTORY_ENTRY_COLS = ['ingredient_local_id', 'type', 'amount', 'entry_date', 'created_at', 'order_local_id', 'order_item_local_id', 'reason'];
+const INVENTORY_ENTRY_COLS = ['ingredient_local_id', 'type', 'amount', 'entry_date', 'created_at', 'order_local_id', 'order_item_local_id', 'reason', 'superseded_by'];
 
 const ORDER_VALUES = (r) => [
   num(r.total), num(r.discount), str(r.payment_method), str(r.status),
@@ -272,7 +272,7 @@ async function recomputeStock(client, branchId) {
   await client.query(`
     UPDATE ingredients i
        SET stock = COALESCE((SELECT SUM(e.amount) FROM inventory_entries e
-                              WHERE e.branch_id = i.branch_id AND e.ingredient_local_id = i.local_id), 0)
+                              WHERE e.branch_id = i.branch_id AND e.ingredient_local_id = i.local_id AND e.superseded_by IS NULL), 0)
      WHERE i.branch_id = $1`, [branchId]);
 }
 
@@ -343,7 +343,7 @@ async function ingestInventoryEntries(client, branchId, rows, receivedAt, device
   const { sql, params } = buildUpsert(
     'inventory_entries', INVENTORY_ENTRY_COLS, resolved,
     r => [num(r.ingredient_id), str(r.type), num(r.amount), str(r.entry_date), str(r.created_at),
-      num(r.order_id), num(r.order_item_id), str(r.reason)],
+      num(r.order_id), num(r.order_item_id), str(r.reason), num(r.superseded_by)],
     receivedAt, branchId, deviceId);
   await client.query(sql, params);
   await recomputeStock(client, branchId);

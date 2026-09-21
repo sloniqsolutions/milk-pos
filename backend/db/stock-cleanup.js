@@ -4,7 +4,7 @@
  * came in. Pure: no database in here, so it runs on the till's SQLite and the
  * cloud's Postgres alike (scripts/cleanup-stock-entries.js loads the rows).
  *
- * An entry is DELETE only if it contradicts the records:
+ * An entry is DELETE (in the tool: marked corrected, never removed) only if it contradicts the records:
  *   (a) a sale entry whose amount is not what its order line used — Milk copied
  *       from a Dahi line, Yogurt copied from a Milk line — or that names an order
  *       line and disagrees with it
@@ -153,7 +153,13 @@ function judge({ entries, lines, batchAt, suspectFrom, suspectTo, collisionKeys 
   for (const list of events.values()) for (const ev of list) if (ev.required && !ev.by) missing.push(ev.line);
   missing.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)) || a.item - b.item);
 
-  return { verdicts, missing, isBatch: (e) => Boolean(batchAt) && String(e.created_at) === batchAt };
+  // The kept entry that now correctly records an order line, if there is one.
+  const coverOf = (line) => {
+    const ev = (events.get(`${line.device}|${line.day}|${line.ingredient}`) || []).find((x) => x.line === line && x.sign === -1);
+    return ev && ev.by ? ev.by : null;
+  };
+
+  return { verdicts, missing, coverOf, isBatch: (e) => Boolean(batchAt) && String(e.created_at) === batchAt };
 }
 
 /** The entry that puts one missing order line's stock back in the books. */

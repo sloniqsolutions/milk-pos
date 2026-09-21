@@ -224,7 +224,7 @@ router.get('/history', requireUser, async (req, res) => {
 
     const entries = await db.q(`
       SELECT ie.local_id AS id, ie.ingredient_local_id AS ingredient_id, ie.type, ie.amount,
-             ie.entry_date, ie.created_at, i.name AS ingredient_name, i.unit AS ingredient_unit
+             ie.reason, ie.superseded_by, ie.entry_date, ie.created_at, i.name AS ingredient_name, i.unit AS ingredient_unit
         FROM inventory_entries ie
         LEFT JOIN ingredients i ON i.branch_id = ie.branch_id AND i.local_id = ie.ingredient_local_id
        WHERE ${conditions.join(' AND ')}

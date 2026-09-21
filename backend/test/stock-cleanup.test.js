@@ -130,3 +130,14 @@ test('an entry that is exactly half of a same-day line with no entry of its own 
   assert.equal(verdicts.get(half2.key).verdict, 'ASK ME');       // the one line is already explained
   assert.equal(missing.length, 1);                                // and the line still gets a correct entry
 });
+
+test('a wrong entry points at the entry that covers its order line, or at the one made for it', () => {
+  const lines = [line(1, '2026-09-17', 'Milk', 3, 3), line(2, '2026-09-17', 'Milk', 0.4, 0.4)];
+  const right = entry('Milk', 'sale', -3, '2026-09-17');
+  const dup = entry('Milk', 'sale', -3, '2026-09-17');
+  const half = entry('Milk', 'sale', -0.2, '2026-09-17');
+  const { verdicts, coverOf, missing } = judge({ entries: [right, dup, half], lines });
+  assert.equal(coverOf(verdicts.get(dup.key).line), right);            // the duplicate points at the kept entry
+  assert.equal(coverOf(verdicts.get(half.key).line), null);            // the half-entry's line needs a new one
+  assert.deepEqual(missing.map((l) => l.item), [2]);
+});

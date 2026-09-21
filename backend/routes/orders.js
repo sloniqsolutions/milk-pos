@@ -387,7 +387,7 @@ const voidOrder = (req, res) => {
       // entries took. An older sale (before entries named their order line)
       // is looked up the way the sale did it, from the recipe.
       const takenByLine = db.prepare(
-        "SELECT ingredient_id, -SUM(amount) AS taken FROM inventory_entries WHERE order_item_id = ? AND type = 'sale' GROUP BY ingredient_id HAVING -SUM(amount) > 0"
+        "SELECT ingredient_id, -SUM(amount) AS taken FROM inventory_entries WHERE order_item_id = ? AND type = 'sale' AND superseded_by IS NULL GROUP BY ingredient_id HAVING -SUM(amount) > 0"
       );
       const getRecipe = db.prepare(
         'SELECT id FROM recipes WHERE menu_item_id = ? AND (variant_id = ? OR variant_id IS NULL)'

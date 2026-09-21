@@ -107,6 +107,10 @@ function groupByCloudIdentity(cloudTable, rows) {
         order_id: order && order.device_id === device ? order.orig_id : null,
         order_item_id: item && item.device_id === device ? item.orig_id : null,
       };
+      if (out.superseded_by != null) {
+        const by = identity.lookup('inventory_entries', out.superseded_by);
+        out = { ...out, superseded_by: by && by.device_id === device ? by.orig_id : null };
+      }
     }
     // A payment recorded here for a customer restored from elsewhere refers to
     // that customer by the number the cloud knows them by.

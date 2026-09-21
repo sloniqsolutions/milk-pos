@@ -8,7 +8,7 @@
  *
  * For the till and for the cloud it checks that:
  *   - the default (dry run) changes nothing
- *   - only the provably wrong entries go, each copied into cleanup_log
+ *   - only the provably wrong entries are marked corrected (never deleted), each copied into cleanup_log
  *   - each order line with no correct entry gets one, linked to it and dated by the order
  *   - after a physical count the table adds up, each Opening is the previous Closing,
  *     Sold per day is the day's order lines, and the last Closing is the stock
@@ -91,12 +91,12 @@ function cloudSetup() { // in its own process, which exits so the next one can c
 /** The stock table as the till's own report route would draw it, checked against the order lines. */
 function tillTableProblems() {
   const problems = [];
-  const days = till.prepare("SELECT DISTINCT entry_date d FROM inventory_entries ORDER BY 1").all().map((r) => r.d);
+  const days = till.prepare("SELECT DISTINCT entry_date d FROM inventory_entries WHERE superseded_by IS NULL ORDER BY 1").all().map((r) => r.d);
   for (const name of ['Milk', 'Yogurt']) {
     const id = till.prepare('SELECT id FROM ingredients WHERE name = ?').get(name).id;
     let closing = 0;
     for (const d of days) {
-      const day = till.prepare('SELECT COALESCE(SUM(amount),0) s, COALESCE(-SUM(CASE WHEN type = \'sale\' THEN amount END),0) sold FROM inventory_entries WHERE ingredient_id = ? AND entry_date = ?').get(id, d);
+      const day = till.prepare('SELECT COALESCE(SUM(amount),0) s, COALESCE(-SUM(CASE WHEN type = \'sale\' THEN amount END),0) sold FROM inventory_entries WHERE superseded_by IS NULL AND ingredient_id = ? AND entry_date = ?').get(id, d);
       closing += day.s;
       const lines = till.prepare(`SELECT COALESCE(SUM(CASE WHEN oi.name LIKE 'Dahi%' THEN oi.quantity * 1000 ELSE oi.quantity * CASE WHEN oi.name LIKE '2 Litre' THEN 2 ELSE 1 END END), 0) used
         FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE o.status != 'voided' AND DATE(o.created_at) = ? AND ${name === 'Milk' ? "oi.name NOT LIKE 'Dahi%'" : "oi.name LIKE 'Dahi%'"}`).get(d).used;
@@ -129,10 +129,13 @@ function tillTableProblems() {
   r = run([...common, '--apply', '--recount', `Milk=${RECOUNT.Milk},Yogurt=${RECOUNT.Yogurt}`]);
   const runId = (r.text.match(/APPLIED as (\S+):/) || [])[1];
   check('it applies', r.status === 0 && !!runId, r.text.split('\n').slice(-3).join(' | '));
-  const left = till.prepare('SELECT id FROM inventory_entries ORDER BY id').all().map((x) => x.id);
-  check('only the provably wrong entries are gone', WRONG.every((id) => !left.includes(id)) && [1, 2, 4, 6, 9, 10].every((id) => left.includes(id)));
-  const logged = till.prepare("SELECT COUNT(*) n FROM cleanup_log WHERE action = 'DELETED' AND json_valid(row_json)").get().n;
-  check('every removed row is kept in cleanup_log as JSON', logged === WRONG.length, `${logged}`);
+  const rowsNow = Object.fromEntries(till.prepare('SELECT id, superseded_by FROM inventory_entries WHERE id <= 10').all().map((x) => [x.id, x.superseded_by]));
+  check('nothing is deleted: all ten original entries are still there', Object.keys(rowsNow).length === 10);
+  check('only the provably wrong entries are marked corrected', WRONG.every((id) => rowsNow[id] != null) && [1, 2, 4, 6, 9, 10].every((id) => rowsNow[id] == null));
+  check('each corrected entry points at an entry that exists and is not itself corrected',
+    WRONG.every((id) => till.prepare('SELECT 1 FROM inventory_entries WHERE id = ? AND superseded_by IS NULL').get(rowsNow[id])));
+  const logged = till.prepare("SELECT COUNT(*) n FROM cleanup_log WHERE action = 'SUPERSEDED' AND json_valid(row_json)").get().n;
+  check('every corrected row is kept in cleanup_log as JSON', logged === WRONG.length, `${logged}`);
   const made = till.prepare("SELECT e.*, o.created_at AS ocreated FROM inventory_entries e JOIN orders o ON o.id = e.order_id WHERE e.id > 9000000 AND e.type = 'sale'").all();
   check('each order line with no correct entry got one, linked and dated by its order',
     made.length === CREATED_LINES.length && made.every((e) => e.order_item_id != null && e.entry_date === e.ocreated.slice(0, 10) && e.created_at === e.ocreated), `${made.length}`);
@@ -163,18 +166,20 @@ function tillTableProblems() {
   check('it applies', r.status === 0 && !!cloudRun, r.text.split('\n').slice(-3).join(' | '));
   const after = cloudBackup('after');
   const keys = after.map((e) => `${e.device_id}#${e.local_id}`);
-  check('only the provably wrong entries are gone', WRONG.every((id) => !keys.includes(`${DEV}#${id}`)) && [1, 2, 4, 6, 9, 10].every((id) => keys.includes(`${DEV}#${id}`)));
+  const byKey = Object.fromEntries(after.map((e) => [`${e.device_id}#${e.local_id}`, e.superseded_by]));
+  check('nothing is deleted, and only the provably wrong entries are marked corrected',
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].every((id) => `${DEV}#${id}` in byKey) && WRONG.every((id) => byKey[`${DEV}#${id}`] != null) && [1, 2, 4, 6, 9, 10].every((id) => byKey[`${DEV}#${id}`] == null));
   const createdCloud = after.filter((e) => Number(e.local_id) > 9000000);
   check('the created entries are linked to their order line and dated by the order',
     createdCloud.length === 2 && createdCloud.every((e) => e.order_item_local_id != null && e.type === 'sale'));
   check("the legacy till's line got its entry under the legacy device", createdCloud.some((e) => e.device_id === 'legacy-device' && near(e.amount, -2) && e.entry_date === '2026-09-19'));
-  const sumOf = (ing) => after.filter((e) => Number(e.ingredient_local_id) === ing).reduce((s, e) => s + Number(e.amount), 0);
+  const sumOf = (ing) => after.filter((e) => Number(e.ingredient_local_id) === ing && e.superseded_by == null).reduce((s, e) => s + Number(e.amount), 0);
   check('the last Closing equals the counted stock', near(sumOf(1), RECOUNT.Milk) && near(sumOf(2), RECOUNT.Yogurt), `${sumOf(1)} / ${sumOf(2)}`);
 
   console.log('\nThe cloud: undo');
   r = run(['--cloud', '--undo', cloudRun, '--apply']);
   check('undo runs', r.status === 0 && /Undone/.test(r.text), r.text.trim().split('\n').pop());
-  const norm = (rows) => JSON.stringify(rows.map((e) => [e.device_id, e.local_id, e.ingredient_local_id, e.type, e.amount, e.entry_date, e.created_at]).sort());
+  const norm = (rows) => JSON.stringify(rows.map((e) => [e.device_id, e.local_id, e.ingredient_local_id, e.type, e.amount, e.entry_date, e.created_at, e.superseded_by]).sort());
   check('everything is exactly as it was', norm(cloudBackup('undone')) === norm(JSON.parse(beforeCloud)));
 
   console.log(failures ? `\n${failures} CHECK(S) FAILED` : '\nALL CHECKS PASSED');

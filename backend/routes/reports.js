@@ -129,7 +129,7 @@ router.get('/kpi', (req, res) => {
              COALESCE(-SUM(CASE WHEN ie.type = 'sale' THEN ie.amount ELSE 0 END), 0) AS used
         FROM ingredients i
         LEFT JOIN inventory_entries ie
-          ON ie.ingredient_id = i.id AND DATE(ie.entry_date) BETWEEN DATE(?) AND DATE(?)
+          ON ie.ingredient_id = i.id AND ie.superseded_by IS NULL AND DATE(ie.entry_date) BETWEEN DATE(?) AND DATE(?)
        GROUP BY i.id, i.name, i.unit, i.stock
        ORDER BY i.name
     `).all(from, to);
@@ -169,14 +169,14 @@ router.get('/stock-movement', (req, res) => {
              ${MOVEMENT_SUMS}
         FROM inventory_entries ie
         JOIN ingredients i ON i.id = ie.ingredient_id
-       WHERE DATE(ie.entry_date) BETWEEN DATE(?) AND DATE(?)
+       WHERE ie.superseded_by IS NULL AND DATE(ie.entry_date) BETWEEN DATE(?) AND DATE(?)
        GROUP BY ie.entry_date, i.id, i.name, i.unit
     `).all(from, to);
     const openings = {};
     db.prepare(`
       SELECT ingredient_id, SUM(amount) AS opening
         FROM inventory_entries
-       WHERE DATE(entry_date) < DATE(?)
+       WHERE superseded_by IS NULL AND DATE(entry_date) < DATE(?)
        GROUP BY ingredient_id
     `).all(from).forEach((r) => { openings[r.ingredient_id] = Number(r.opening) || 0; });
     const daysInRange = Math.max(1, Math.round((new Date(to) - new Date(from)) / 86400000) + 1);

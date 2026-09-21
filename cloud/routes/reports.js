@@ -191,7 +191,7 @@ router.get('/kpi', requireUser, async (req, res) => {
              COALESCE(-SUM(CASE WHEN ie.type = 'sale' THEN ie.amount ELSE 0 END)::float8, 0) AS used
         FROM ingredients i
         LEFT JOIN inventory_entries ie
-          ON ie.branch_id = i.branch_id AND ie.ingredient_local_id = i.local_id
+          ON ie.branch_id = i.branch_id AND ie.ingredient_local_id = i.local_id AND ie.superseded_by IS NULL
          AND ie.entry_date::date BETWEEN ?::date AND ?::date
        WHERE i.branch_id = ?
        GROUP BY i.local_id, i.name, i.unit, i.stock
@@ -239,13 +239,13 @@ router.get('/stock-movement', requireUser, async (req, res) => {
              ${MOVEMENT_SUMS}
         FROM inventory_entries ie
         JOIN ingredients i ON i.branch_id = ie.branch_id AND i.local_id = ie.ingredient_local_id
-       WHERE ie.branch_id = ? AND ie.entry_date::date BETWEEN ?::date AND ?::date
+       WHERE ie.branch_id = ? AND ie.superseded_by IS NULL AND ie.entry_date::date BETWEEN ?::date AND ?::date
        GROUP BY ie.entry_date, i.local_id, i.name, i.unit
     `, [branchId, from, to]);
     const before = await db.q(`
       SELECT ie.ingredient_local_id AS ingredient_id, SUM(ie.amount) AS opening
         FROM inventory_entries ie
-       WHERE ie.branch_id = ? AND ie.entry_date::date < ?::date
+       WHERE ie.branch_id = ? AND ie.superseded_by IS NULL AND ie.entry_date::date < ?::date
        GROUP BY ie.ingredient_local_id
     `, [branchId, from]);
     const openings = {};

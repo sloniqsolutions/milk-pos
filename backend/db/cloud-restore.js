@@ -444,6 +444,8 @@ async function applyCloudRestore(data, options = {}) {
       const insertEntry = db.prepare(`
         INSERT INTO inventory_entries (id, ingredient_id, type, amount, entry_date, created_at, order_id, order_item_id, reason)
         VALUES (?, ?, ?, ?, ?, COALESCE(?, datetime('now', 'localtime')), ?, ?, ?)`);
+      const entryIdByKey = new Map();
+      const supersedes = [];
       entryRows.forEach((e, i) => {
         const ingredientId = ingredientIdByOriginal.get(e.ingredient_local_id);
         if (ingredientId == null || !e.type || !e.entry_date || e.amount == null || e.amount === '' || !Number.isFinite(Number(e.amount))) {
@@ -455,12 +457,18 @@ async function applyCloudRestore(data, options = {}) {
         const itemId = e.order_item_local_id == null ? null : (itemIdByKey.get(`${e.device_id || ''}|${e.order_item_local_id}`) ?? null);
         insertEntry.run(entryIds[i], ingredientId, String(e.type), Number(e.amount), String(e.entry_date), text(e.created_at),
           orderId, itemId, text(e.reason));
+        entryIdByKey.set(`${e.device_id || ''}|${e.local_id}`, entryIds[i]);
+        if (e.superseded_by != null) supersedes.push([entryIds[i], `${e.device_id || ''}|${e.superseded_by}`]);
+      });
+      // A corrected entry keeps pointing at the entry that corrects it, under its new number.
+      supersedes.forEach(([id, key]) => {
+        if (entryIdByKey.has(key)) db.prepare('UPDATE inventory_entries SET superseded_by = ? WHERE id = ?').run(entryIdByKey.get(key), id);
       });
       // Stock is what the restored entries add up to — never a number copied
       // across. Every ingredient, so one the export did not mention is 0, not stale.
       db.prepare(`
         UPDATE ingredients
-           SET stock = COALESCE((SELECT SUM(amount) FROM inventory_entries WHERE ingredient_id = ingredients.id), 0)`).run();
+           SET stock = COALESCE((SELECT SUM(amount) FROM inventory_entries WHERE ingredient_id = ingredients.id AND superseded_by IS NULL), 0)`).run();
     }
 
     // CREDIT PAYMENTS — each one on its own, with its own date, so "credit collected"

@@ -238,6 +238,9 @@ try { db.exec("ALTER TABLE ingredients ADD COLUMN low_stock_threshold REAL DEFAU
 try { db.exec("ALTER TABLE inventory_entries ADD COLUMN order_id INTEGER;"); } catch(e) {}
 try { db.exec("ALTER TABLE inventory_entries ADD COLUMN order_item_id INTEGER;"); } catch(e) {}
 try { db.exec("ALTER TABLE inventory_entries ADD COLUMN reason TEXT;"); } catch(e) {}
+// A wrong entry is never deleted: it points at the entry that corrects it, and every
+// total ignores it. The original stays in the history.
+try { db.exec("ALTER TABLE inventory_entries ADD COLUMN superseded_by INTEGER;"); } catch(e) {}
 // One sale entry per order line and ingredient, so a sale can never be logged twice.
 try {
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_inventory_entries_sale_line ON inventory_entries(order_item_id, ingredient_id) WHERE type = 'sale' AND amount < 0 AND order_item_id IS NOT NULL;");

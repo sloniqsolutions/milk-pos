@@ -762,6 +762,9 @@ ALTER TABLE inventory_entries ADD COLUMN IF NOT EXISTS device_id TEXT;
 ALTER TABLE inventory_entries ADD COLUMN IF NOT EXISTS order_local_id INTEGER;
 ALTER TABLE inventory_entries ADD COLUMN IF NOT EXISTS order_item_local_id INTEGER;
 ALTER TABLE inventory_entries ADD COLUMN IF NOT EXISTS reason TEXT;
+-- The entry that corrects this one (same till, that till's own number). A corrected
+-- entry stays in the history but is left out of every total.
+ALTER TABLE inventory_entries ADD COLUMN IF NOT EXISTS superseded_by INTEGER;
 
 -- Branch 1's own till — the only till that has ever pushed to this branch
 -- before device_id existed, so every pre-migration row genuinely is its

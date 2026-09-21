@@ -1,5 +1,5 @@
 /**
- * Removes the stock entries that are provably wrong, and only those. DRY RUN by
+ * Marks the stock entries that are provably wrong as corrected, and only those. Nothing is ever deleted: a wrong entry gets superseded_by = the entry that corrects it, every total ignores it, and it stays in the history. DRY RUN by
  * default: nothing is changed unless --apply is given. Works on the cloud (Postgres)
  * and on a till's own database (SQLite) — a till's next sync would put removed rows
  * back on the cloud, so each till needs the same script.
@@ -12,8 +12,8 @@
  *
  *   --apply                 do it (default is a dry run, which only reads)
  *   --backup <file.json>    write every inventory entry to a file and stop
- *   --undo <run id> --apply put back what an earlier run removed, remove what it created
- *   --delete <key,key>      also delete these ASK ME entries (keys are shown in the report)
+ *   --undo <run id> --apply un-mark what an earlier run corrected, remove what it created
+ *   --supersede <key,key>   also mark these ASK ME entries corrected (keys are shown in the report)
  *   --recount Milk=N,Yogurt=N   with --apply: one visible "Recount" entry so the last
  *                           Closing equals the counted stock (N = the physical count)
  *   --device <id>           a till's own device id (default: read device-id.json beside the database)
@@ -24,7 +24,7 @@
  *                           (default: the main till's #1-#7)
  *   --report <file>         also write the full report to a file
  *
- * Every removed row is copied, as JSON, into cleanup_log (kept). Nothing outside
+ * Every corrected row is copied, as JSON, into cleanup_log (kept). Nothing outside
  * inventory_entries is touched — no orders, revenue, payments, customers,
  * expenses or shifts — except the stock counters when --recount says what was counted.
  */
@@ -77,7 +77,7 @@ function tillSource(dbPath) {
   return {
     kind: 'till', label: `till database ${path.basename(dbPath)} (own device ${short(own)})`, ingredients, yogurtUnit: ingredients.Yogurt && ingredients.Yogurt.unit,
     load() {
-      const entries = db.prepare(`SELECT ie.*, i.name AS ingredient FROM inventory_entries ie JOIN ingredients i ON i.id = ie.ingredient_id ORDER BY ie.id`).all().map((e) => {
+      const entries = db.prepare(`SELECT ie.*, i.name AS ingredient FROM inventory_entries ie JOIN ingredients i ON i.id = ie.ingredient_id ${has('inventory_entries', 'superseded_by') ? 'WHERE ie.superseded_by IS NULL' : ''} ORDER BY ie.id`).all().map((e) => {
         const me = ident('inventory_entries', e.id);
         const o = linked && e.order_id != null ? ident('orders', e.order_id) : null;
         const it = linked && e.order_item_id != null ? ident('order_items', e.order_item_id) : null;
@@ -105,12 +105,12 @@ function tillSource(dbPath) {
       return Boolean(findOrig(t, spec.device, spec.id)) || (spec.device === own && db.prepare(`SELECT 1 FROM ${t} WHERE id = ?`).get(spec.id) !== undefined);
     },
     backup: () => db.prepare('SELECT * FROM inventory_entries ORDER BY id').all(),
-    apply({ runId, del, created, recount }) {
+    apply({ runId, supersede, created, recount }) {
       db.exec(`CREATE TABLE IF NOT EXISTS cleanup_log (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, run_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
         source TEXT, action TEXT NOT NULL, device_id TEXT, local_id INTEGER, row_json TEXT, verdict TEXT, reason TEXT)`);
       if (!hasIdentity) db.exec('CREATE TABLE IF NOT EXISTS cloud_identity (tbl TEXT NOT NULL, local_id INTEGER NOT NULL, device_id TEXT NOT NULL, orig_id INTEGER NOT NULL, PRIMARY KEY (tbl, local_id))');
-      if (!has('inventory_entries', 'order_id')) {
-        for (const c of ['order_id INTEGER', 'order_item_id INTEGER', 'reason TEXT']) db.exec(`ALTER TABLE inventory_entries ADD COLUMN ${c}`);
+      for (const c of ['order_id INTEGER', 'order_item_id INTEGER', 'reason TEXT', 'superseded_by INTEGER']) {
+        if (!has('inventory_entries', c.split(' ')[0])) db.exec(`ALTER TABLE inventory_entries ADD COLUMN ${c}`);
       }
       const log = db.prepare('INSERT INTO cleanup_log (run_id, source, action, device_id, local_id, row_json, verdict, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
       const getRow = db.prepare('SELECT * FROM inventory_entries WHERE id = ?');
@@ -118,20 +118,22 @@ function tillSource(dbPath) {
       const ingId = (name) => ingredients[name].id;
       const insert = db.prepare(`INSERT INTO inventory_entries (id, ingredient_id, type, amount, entry_date, created_at, order_id, order_item_id, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       db.transaction(() => {
-        for (const { e, verdict, reason } of del) {
-          log.run(runId, 'till', 'DELETED', e.device, e.localId, JSON.stringify(getRow.get(e.localId)), verdict, reason);
-          db.prepare('DELETE FROM inventory_entries WHERE id = ?').run(e.localId);
-          if (hasIdentity) db.prepare("DELETE FROM cloud_identity WHERE tbl = 'inventory_entries' AND local_id = ?").run(e.localId);
-        }
         let next = Math.max(CREATED_BASE, db.prepare('SELECT COALESCE(MAX(id), 0) m FROM inventory_entries').get().m);
+        const createdLocal = new Map();
         for (const c of created) {
           const id = ++next;
           insert.run(id, ingId(c.ingredient), 'sale', c.amount, c.entry_date, c.created_at, c.localOrder ?? null, c.localItem ?? null, null);
           remember.run('inventory_entries', id, c.device, c.id);
+          createdLocal.set(c.key, id);
           log.run(runId, 'till', 'CREATED', c.device, id, JSON.stringify({ ...c, localId: id }), 'CREATED', `sale entry for order line #${c.item}`);
         }
+        for (const { e, verdict, reason, by } of supersede) {
+          const target = by.created ? createdLocal.get(by.created.key) : by.existing.localId;
+          log.run(runId, 'till', 'SUPERSEDED', e.device, e.localId, JSON.stringify(getRow.get(e.localId)), verdict, reason);
+          db.prepare('UPDATE inventory_entries SET superseded_by = ? WHERE id = ?').run(target, e.localId);
+        }
         for (const [name, counted] of Object.entries(recount)) {
-          const sum = db.prepare('SELECT COALESCE(SUM(amount), 0) s FROM inventory_entries WHERE ingredient_id = ?').get(ingId(name)).s;
+          const sum = db.prepare('SELECT COALESCE(SUM(amount), 0) s FROM inventory_entries WHERE ingredient_id = ? AND superseded_by IS NULL').get(ingId(name)).s;
           const before = db.prepare('SELECT stock FROM ingredients WHERE id = ?').get(ingId(name)).stock;
           const amount = Math.round((counted - sum) * 1e6) / 1e6;
           const id = ++next;
@@ -150,9 +152,8 @@ function tillSource(dbPath) {
       db.transaction(() => {
         for (const r of rows) {
           const j = JSON.parse(r.row_json);
-          if (r.action === 'DELETED') {
-            db.prepare(`INSERT OR IGNORE INTO inventory_entries (id, ingredient_id, type, amount, entry_date, created_at, order_id, order_item_id, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-              .run(j.id, j.ingredient_id, j.type, j.amount, j.entry_date, j.created_at, j.order_id ?? null, j.order_item_id ?? null, j.reason ?? null);
+          if (r.action === 'SUPERSEDED') {
+            db.prepare('UPDATE inventory_entries SET superseded_by = NULL WHERE id = ?').run(r.local_id);
           } else if (r.action === 'CREATED' || (r.action === 'RECOUNT' && r.local_id)) {
             db.prepare('DELETE FROM inventory_entries WHERE id = ?').run(r.local_id);
             db.prepare("DELETE FROM cloud_identity WHERE tbl = 'inventory_entries' AND local_id = ?").run(r.local_id);
@@ -191,7 +192,7 @@ async function cloudSource() {
   return {
     kind: 'cloud', label: `the cloud (branch ${BRANCH})`, ingredients,
     async load() {
-      const entries = (await q('SELECT * FROM inventory_entries WHERE branch_id = $1 ORDER BY device_id, local_id', [BRANCH])).map((e) => ({
+      const entries = (await q(`SELECT * FROM inventory_entries WHERE branch_id = $1 ${cols.includes('superseded_by') ? 'AND superseded_by IS NULL' : ''} ORDER BY device_id, local_id`, [BRANCH])).map((e) => ({
         key: `${e.device_id}#${e.local_id}`, device: e.device_id, id: Number(e.local_id), ingredient: byId[e.ingredient_local_id] || `#${e.ingredient_local_id}`,
         type: e.type, amount: Number(e.amount), entry_date: e.entry_date, created_at: e.created_at, reason: e.reason || null,
         order: linked && e.order_local_id != null ? Number(e.order_local_id) : null, item: linked && e.order_item_local_id != null ? Number(e.order_item_local_id) : null,
@@ -211,17 +212,12 @@ async function cloudSource() {
       return (await q(`SELECT 1 FROM ${t} WHERE branch_id = $1 AND device_id = $2 AND local_id = $3`, [BRANCH, spec.device, spec.id])).length > 0;
     },
     async backup() { return q('SELECT * FROM inventory_entries WHERE branch_id = $1 ORDER BY device_id, local_id', [BRANCH]); },
-    async apply({ runId, del, created, recount }) {
+    async apply({ runId, supersede, created, recount }) {
       await client.query(`CREATE TABLE IF NOT EXISTS cleanup_log (id SERIAL PRIMARY KEY, run_id TEXT NOT NULL, run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         source TEXT, action TEXT NOT NULL, device_id TEXT, local_id INTEGER, row_json TEXT, verdict TEXT, reason TEXT)`);
-      for (const c of ['order_local_id INTEGER', 'order_item_local_id INTEGER', 'reason TEXT']) await client.query(`ALTER TABLE inventory_entries ADD COLUMN IF NOT EXISTS ${c}`);
+      for (const c of ['order_local_id INTEGER', 'order_item_local_id INTEGER', 'reason TEXT', 'superseded_by INTEGER']) await client.query(`ALTER TABLE inventory_entries ADD COLUMN IF NOT EXISTS ${c}`);
       const log = (action, device, id, row, verdict, reason) => client.query(
         'INSERT INTO cleanup_log (run_id, source, action, device_id, local_id, row_json, verdict, reason) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [runId, 'cloud', action, device, id, JSON.stringify(row), verdict, reason]);
-      for (const { e, verdict, reason } of del) {
-        const row = (await q('SELECT * FROM inventory_entries WHERE branch_id = $1 AND device_id = $2 AND local_id = $3', [BRANCH, e.device, e.id]))[0];
-        await log('DELETED', e.device, e.id, row, verdict, reason);
-        await client.query('DELETE FROM inventory_entries WHERE branch_id = $1 AND device_id = $2 AND local_id = $3', [BRANCH, e.device, e.id]);
-      }
       const insert = (device, id, ingredient, type, amount, date, createdAt, order, item, reason) => client.query(
         `INSERT INTO inventory_entries (branch_id, device_id, local_id, ingredient_local_id, type, amount, entry_date, created_at, received_at, order_local_id, order_item_local_id, reason)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (branch_id, device_id, local_id) DO NOTHING`,
@@ -230,29 +226,33 @@ async function cloudSource() {
         await insert(c.device, c.id, c.ingredient, 'sale', c.amount, c.entry_date, c.created_at, c.order, c.item, null);
         await log('CREATED', c.device, c.id, c, 'CREATED', `sale entry for order line #${c.item}`);
       }
+      for (const { e, verdict, reason, by } of supersede) {
+        const row = (await q('SELECT * FROM inventory_entries WHERE branch_id = $1 AND device_id = $2 AND local_id = $3', [BRANCH, e.device, e.id]))[0];
+        await log('SUPERSEDED', e.device, e.id, row, verdict, reason);
+        await client.query('UPDATE inventory_entries SET superseded_by = $4 WHERE branch_id = $1 AND device_id = $2 AND local_id = $3', [BRANCH, e.device, e.id, by.created ? by.created.id : by.existing.id]);
+      }
       for (const [name, counted] of Object.entries(recount)) {
-        const sum = Number((await q('SELECT COALESCE(SUM(amount), 0)::float8 s FROM inventory_entries WHERE branch_id = $1 AND ingredient_local_id = $2', [BRANCH, ingredients[name].id]))[0].s);
+        const sum = Number((await q('SELECT COALESCE(SUM(amount), 0)::float8 s FROM inventory_entries WHERE branch_id = $1 AND ingredient_local_id = $2 AND superseded_by IS NULL', [BRANCH, ingredients[name].id]))[0].s);
         const amount = Math.round((counted - sum) * 1e6) / 1e6;
         if (amount !== 0) await insert('cleanup', ingredients[name].id, name, 'stock', amount, new Date().toLocaleDateString('en-CA'), null, null, null, 'Recount');
         await log('RECOUNT', 'cleanup', amount !== 0 ? ingredients[name].id : null, { name, counted, entry_amount: amount, counter_before: ingredients[name].stock }, 'RECOUNT', 'physical count');
       }
       // The cloud's stock is what its entries add up to.
-      await client.query(`UPDATE ingredients i SET stock = COALESCE((SELECT SUM(e.amount) FROM inventory_entries e WHERE e.branch_id = i.branch_id AND e.ingredient_local_id = i.local_id), 0) WHERE i.branch_id = $1`, [BRANCH]);
+      await client.query(`UPDATE ingredients i SET stock = COALESCE((SELECT SUM(e.amount) FROM inventory_entries e WHERE e.branch_id = i.branch_id AND e.ingredient_local_id = i.local_id AND e.superseded_by IS NULL), 0) WHERE i.branch_id = $1`, [BRANCH]);
     },
     async undo(runId) {
       const rows = await q('SELECT * FROM cleanup_log WHERE run_id = $1 ORDER BY id DESC', [runId]);
       if (!rows.length) throw new Error(`No log rows for run ${runId}.`);
       for (const r of rows) {
         const j = JSON.parse(r.row_json);
-        if (r.action === 'DELETED') {
-          const cols2 = Object.keys(j).filter((k) => k !== 'id');
-          await client.query(`INSERT INTO inventory_entries (${cols2.join(',')}) VALUES (${cols2.map((_, i) => `$${i + 1}`).join(',')}) ON CONFLICT (branch_id, device_id, local_id) DO NOTHING`, cols2.map((k) => j[k]));
+        if (r.action === 'SUPERSEDED') {
+          await client.query('UPDATE inventory_entries SET superseded_by = NULL WHERE branch_id = $1 AND device_id = $2 AND local_id = $3', [BRANCH, r.device_id, r.local_id]);
         } else if (r.action === 'CREATED' || (r.action === 'RECOUNT' && r.local_id)) {
           await client.query('DELETE FROM inventory_entries WHERE branch_id = $1 AND device_id = $2 AND local_id = $3', [BRANCH, r.device_id, r.local_id]);
         }
       }
       await client.query('DELETE FROM cleanup_log WHERE run_id = $1', [runId]);
-      await client.query(`UPDATE ingredients i SET stock = COALESCE((SELECT SUM(e.amount) FROM inventory_entries e WHERE e.branch_id = i.branch_id AND e.ingredient_local_id = i.local_id), 0) WHERE i.branch_id = $1`, [BRANCH]);
+      await client.query(`UPDATE ingredients i SET stock = COALESCE((SELECT SUM(e.amount) FROM inventory_entries e WHERE e.branch_id = i.branch_id AND e.ingredient_local_id = i.local_id AND e.superseded_by IS NULL), 0) WHERE i.branch_id = $1`, [BRANCH]);
     },
     async close() { await client.query(APPLY ? 'COMMIT' : 'ROLLBACK'); await client.end(); },
   };
@@ -279,10 +279,25 @@ async function main() {
   const [cDev, cRange] = COLLIDE.split(':'); const [cFrom, cTo] = (cRange || '').split('-').map(Number);
   const collisionKeys = new Set(entries.filter((e) => e.device === cDev && e.id >= cFrom && e.id <= cTo).map((e) => e.key));
   const result = judge({ entries, lines, batchAt: BATCH_AT, suspectFrom: SUSPECT_FROM, suspectTo: SUSPECT_TO, collisionKeys });
-  const { verdicts, missing } = result;
-  const askDelete = new Set((opt('delete', '') || '').split(',').filter(Boolean));
+  const { verdicts, missing, coverOf } = result;
+  const askDelete = new Set((opt('supersede', '') || '').split(',').filter(Boolean));
   const willDelete = entries.filter((e) => verdicts.get(e.key).verdict === 'DELETE' || askDelete.has(e.key));
   const created = missing.map((l) => ({ ...createdEntryFor(l), localOrder: l.localOrder, localItem: l.localItem }));
+  const createdByLine = new Map(created.map((c) => [`${c.device}|${c.item}`, c]));
+  // Each corrected entry points at the entry that now records its order line correctly.
+  const replacementFor = (e) => {
+    const line = verdicts.get(e.key).line;
+    if (!line) return null;
+    const cover = coverOf(line);
+    if (cover && cover.device === e.device) return { existing: cover };
+    const made = createdByLine.get(`${line.device}|${line.item}`);
+    return made ? { created: made } : null; // its number is in the 9,000,000 band, so it names one entry
+  };
+  const noReplacement = willDelete.filter((e) => !replacementFor(e));
+  if (noReplacement.length) {
+    console.error(`Stopped: ${noReplacement.length} entries have no entry to point at: ${noReplacement.map((e) => e.key).join(', ')}`);
+    process.exit(1);
+  }
 
   const isCandidate = (e) => result.isBatch(e) || collisionKeys.has(e.key) || (e.entry_date >= SUSPECT_FROM && e.entry_date <= SUSPECT_TO) || verdicts.get(e.key).verdict !== 'KEEP';
   const cands = entries.filter(isCandidate);
@@ -343,7 +358,7 @@ async function main() {
   }
   out();
   const asks = cands.filter((e) => verdicts.get(e.key).verdict === 'ASK ME' && !askDelete.has(e.key));
-  out(`SUMMARY: ${willDelete.length} to delete, ${created.length} to create, ${asks.length} ASK ME (left exactly as they are unless you say otherwise).`);
+  out(`SUMMARY: ${willDelete.length} to mark corrected (superseded), ${created.length} to create, ${asks.length} ASK ME (left exactly as they are unless you say otherwise).`);
 
   if (opt('report')) fs.writeFileSync(opt('report'), lines_out.join('\n') + '\n');
 
@@ -354,10 +369,10 @@ async function main() {
   const runId = `cleanup-${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomBytes(2).toString('hex')}`;
   await src.apply({
     runId,
-    del: willDelete.map((e) => ({ e, verdict: askDelete.has(e.key) ? 'DELETE (chosen)' : 'DELETE', reason: verdicts.get(e.key).reason })),
+    supersede: willDelete.map((e) => ({ e, verdict: askDelete.has(e.key) ? 'CORRECTED (chosen)' : 'CORRECTED', reason: verdicts.get(e.key).reason, by: replacementFor(e) })),
     created, recount,
   });
-  out(`APPLIED as ${runId}: ${willDelete.length} removed (each copied into cleanup_log), ${created.length} created.`);
+  out(`APPLIED as ${runId}: ${willDelete.length} marked corrected (each copied into cleanup_log, none deleted), ${created.length} created.`);
   out(`To put it all back: --undo ${runId} --apply`);
   await src.close();
 }

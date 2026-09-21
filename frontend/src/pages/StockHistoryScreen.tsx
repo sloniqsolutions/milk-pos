@@ -152,6 +152,12 @@ export default function StockHistoryScreen() {
                         <span style={{ fontSize: 14, fontWeight: 700, color: positive ? '#16A34A' : '#EF4444' }}>
                           {positive ? '+' : ''}{entry.amount} {entry.ingredient_unit}
                         </span>
+                        {entry.superseded_by != null && (
+                          <div style={{ fontSize: 12, color: '#6B7280' }}>corrected, see entry #{entry.superseded_by}</div>
+                        )}
+                        {entry.reason && entry.superseded_by == null && (
+                          <div style={{ fontSize: 12, color: '#6B7280' }}>{entry.reason}</div>
+                        )}
                       </td>
                       <td style={{ padding: '16px 24px', color: '#374151', fontSize: 14, fontWeight: 500 }}>
                         {entry.entry_date}

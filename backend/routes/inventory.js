@@ -161,7 +161,7 @@ router.get('/history', (req, res) => {
 
   try {
     let query = `
-      SELECT ie.id, ie.ingredient_id, ie.type, ie.amount, ie.entry_date, ie.created_at,
+      SELECT ie.id, ie.ingredient_id, ie.type, ie.amount, ie.entry_date, ie.created_at, ie.reason, ie.superseded_by,
              i.name AS ingredient_name, i.unit AS ingredient_unit
       FROM inventory_entries ie
       JOIN ingredients i ON i.id = ie.ingredient_id
