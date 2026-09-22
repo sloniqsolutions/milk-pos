@@ -13,6 +13,15 @@ const { createClassifier } = require('../db/line-classifier');
 const { classifyLine, splitOrderLines } = createClassifier(unitAmount);
 
 /**
+ * Money, to the paisa. Without this, summing REAL columns leaves the kind of
+ * dust (6433.6900000000005) that SQLite and Postgres round off at slightly
+ * different points in the same SUM — so the same sales showed a different
+ * total revenue on the till than on the dashboard for the exact same range.
+ * Every money figure this file returns is rounded once, here, on the way out.
+ */
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+/**
  * Every report takes an optional from/to. An unreadable one (a typo, a
  * half-typed custom range, a hand-built URL) used to reach date arithmetic and
  * come back as a 500 reading "Invalid time value". It is answered here, once,
@@ -143,10 +152,13 @@ router.get('/kpi', (req, res) => {
 
     res.json({
       ...summary,
+      total_revenue: round2(summary.total_revenue),
+      avg_order_value: round2(summary.avg_order_value),
+      total_discounts: round2(summary.total_discounts),
       revenue_trend: revenueTrend,
       orders_trend: ordersTrend,
-      credit_collected: creditCollected.credit_collected,
-      credit_undated: creditUndated,
+      credit_collected: round2(creditCollected.credit_collected),
+      credit_undated: round2(creditUndated),
       ingredient_usage: ingredientUsage,
     });
   } catch (err) {
@@ -228,7 +240,7 @@ router.get('/revenue-over-time', (req, res) => {
       `;
     }
     const data = db.prepare(query).all(from, to, ...scope.params);
-    res.json(data);
+    res.json(data.map((r) => ({ ...r, revenue: round2(r.revenue) })));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -257,6 +269,7 @@ router.get('/top-items', (req, res) => {
     const totalRevenue = items.reduce((s, i) => s + i.total_revenue, 0);
     const result = items.map(i => ({
       ...i,
+      total_revenue: round2(i.total_revenue),
       percentage: totalRevenue > 0 ? ((i.total_revenue / totalRevenue) * 100).toFixed(1) : 0
     }));
 
@@ -297,6 +310,7 @@ router.get('/by-category', (req, res) => {
     const totalRevenue = data.reduce((s, i) => s + i.total_revenue, 0);
     const result = data.map(i => ({
       ...i,
+      total_revenue: round2(i.total_revenue),
       percentage: totalRevenue > 0 ? ((i.total_revenue / totalRevenue) * 100).toFixed(1) : 0
     }));
 
@@ -331,7 +345,7 @@ router.get('/hourly-heatmap', (req, res) => {
       GROUP BY day_num, hour
       ORDER BY day_num, hour
     `).all(...scope.params);
-    res.json(data);
+    res.json(data.map((r) => ({ ...r, revenue: round2(r.revenue) })));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -356,7 +370,7 @@ router.get('/cashier-performance', (req, res) => {
       GROUP BY o.cashier_id, o.cashier_name
       ORDER BY total_revenue DESC
     `).all(from, to, ...scope.params);
-    res.json(data);
+    res.json(data.map((r) => ({ ...r, total_revenue: round2(r.total_revenue), avg_order_value: round2(r.avg_order_value), total_discounts: round2(r.total_discounts) })));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -410,7 +424,13 @@ router.get('/detailed', (req, res) => {
         COALESCE(SUM(oi.price * oi.quantity), 0) AS subtotal,
         ROUND(COALESCE(SUM(oi.quantity), 0), 4)  AS total_qty,
         COUNT(oi.id)                             AS line_count,
-        GROUP_CONCAT(oi.name || ' x' || oi.quantity, ', ') AS items
+        -- printf('%.10g', ...) rather than plain concatenation: SQLite renders a
+        -- REAL quantity of 1 as "1.0", where Postgres's STRING_AGG (cloud's own
+        -- copy of this query) renders the same DOUBLE PRECISION value as "1" —
+        -- so an order's item summary read differently on the till than on the
+        -- dashboard for the exact same sale. %.10g is plenty of precision for
+        -- any real litre/kg quantity and matches Postgres's own formatting.
+        GROUP_CONCAT(oi.name || ' x' || printf('%.10g', oi.quantity), ', ') AS items
       FROM orders o
       LEFT JOIN order_items oi ON oi.order_id = o.id
       WHERE DATE(o.created_at) BETWEEN DATE(?) AND DATE(?)
@@ -442,6 +462,7 @@ router.get('/detailed', (req, res) => {
     // GROUP_CONCAT returns NULL for an order with no line items.
     res.json(orders.map(o => ({
       ...o,
+      subtotal: round2(o.subtotal),
       items: o.items || '',
       ...(split.get(o.id) || none),
     })));
@@ -531,7 +552,7 @@ router.get('/daily', (req, res) => {
       GROUP BY DATE(created_at)
       ORDER BY date DESC
     `).all(from, to, ...scope.params);
-    res.json(data);
+    res.json(data.map((r) => ({ ...r, total_revenue: round2(r.total_revenue), total_discounts: round2(r.total_discounts), avg_order_value: round2(r.avg_order_value) })));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -555,9 +576,9 @@ router.get('/net', (req, res) => {
       WHERE DATE(created_at) BETWEEN DATE(?) AND DATE(?)
     `).get(from, to);
 
-    const revenue = revRow.revenue || 0;
-    const expenses = expRow.expenses || 0;
-    const net = revenue - expenses;
+    const revenue = round2(revRow.revenue || 0);
+    const expenses = round2(expRow.expenses || 0);
+    const net = round2(revenue - expenses);
 
     res.json({ revenue, expenses, net });
   } catch (err) {

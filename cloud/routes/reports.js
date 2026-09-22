@@ -46,6 +46,15 @@ const { classifyLine, splitOrderLines } = createClassifier(unitAmount);
 const { requireUser } = require('../middleware/session');
 
 /**
+ * Money, to the paisa — kept identical to backend/routes/reports.js's own
+ * round2. Without it, summing the same sales in Postgres left a shade more
+ * floating-point dust than the same SUM in SQLite (6433.6900000000005 against
+ * the till's clean 6433.69), so the dashboard's revenue read differently from
+ * the till's for the exact same range.
+ */
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+/**
  * CLOUD: narrow a report to one branch.
  *
  * The till's copy also scopes a manager to their own sales. Here the reader is
@@ -205,18 +214,26 @@ router.get('/kpi', requireUser, async (req, res) => {
       ? (((summary.total_orders - prev.total_orders) / prev.total_orders) * 100).toFixed(1)
       : 0;
 
+    const wagesPaid = round2(wages.wages_paid);
+    const totalExpenses = round2(expenses.total_expenses);
+    const totalRevenue = round2(summary.total_revenue);
     res.json({
       ...summary,
       ...expenses,
-      wages_paid: Number(wages.wages_paid) || 0,
+      total_revenue: totalRevenue,
+      avg_order_value: round2(summary.avg_order_value),
+      total_discounts: round2(summary.total_discounts),
+      total_expenses: totalExpenses,
+      drawer_expenses: round2(expenses.drawer_expenses),
+      wages_paid: wagesPaid,
       // Net is what the owner actually keeps, so it has to carry the wage bill
       // too. Without it a month with a full payroll behind it reads as pure
       // profit, which is the single most misleading number this API could
       // return.
-      net_revenue: summary.total_revenue - expenses.total_expenses - (Number(wages.wages_paid) || 0),
+      net_revenue: round2(totalRevenue - totalExpenses - wagesPaid),
       revenue_trend: revenueTrend,
       orders_trend: ordersTrend,
-      credit_collected: Number(creditCollected.credit_collected) || 0,
+      credit_collected: round2(creditCollected.credit_collected),
       ingredient_usage: ingredientUsage,
     });
   } catch (err) {
@@ -299,7 +316,7 @@ router.get('/revenue-over-time', requireUser, async (req, res) => {
       `;
     }
     const data = await db.q(query, [from, to, ...scope.params]);
-    res.json(data);
+    res.json(data.map((r) => ({ ...r, revenue: round2(r.revenue) })));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -335,6 +352,7 @@ router.get('/top-items', requireUser, async (req, res) => {
     const totalRevenue = items.reduce((s, i) => s + i.total_revenue, 0);
     const result = items.map(i => ({
       ...i,
+      total_revenue: round2(i.total_revenue),
       percentage: totalRevenue > 0 ? ((i.total_revenue / totalRevenue) * 100).toFixed(1) : 0
     }));
 
@@ -376,6 +394,7 @@ router.get('/by-category', requireUser, async (req, res) => {
     const totalRevenue = data.reduce((s, i) => s + i.total_revenue, 0);
     const result = data.map(i => ({
       ...i,
+      total_revenue: round2(i.total_revenue),
       percentage: totalRevenue > 0 ? ((i.total_revenue / totalRevenue) * 100).toFixed(1) : 0
     }));
 
@@ -420,7 +439,7 @@ router.get('/hourly-heatmap', requireUser, async (req, res) => {
       ORDER BY EXTRACT(DOW FROM created_at::timestamp),
                EXTRACT(HOUR FROM created_at::timestamp)
     `, [...scope.params]);
-    res.json(data);
+    res.json(data.map((r) => ({ ...r, revenue: round2(r.revenue) })));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -445,7 +464,7 @@ router.get('/cashier-performance', requireUser, async (req, res) => {
       GROUP BY o.cashier_id, o.cashier_name
       ORDER BY total_revenue DESC
     `, [from, to, ...scope.params]);
-    res.json(data);
+    res.json(data.map((r) => ({ ...r, total_revenue: round2(r.total_revenue), avg_order_value: round2(r.avg_order_value), total_discounts: round2(r.total_discounts) })));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -555,6 +574,7 @@ router.get('/detailed', requireUser, async (req, res) => {
     // STRING_AGG returns NULL for an order with no line items.
     res.json(orders.map(o => ({
       ...o,
+      subtotal: round2(o.subtotal),
       items: o.items || '',
       ...(split.get(o.row_key) || none),
     })));
@@ -687,7 +707,11 @@ router.get('/daily', requireUser, async (req, res) => {
       from, to, ...expScope.params,
       ...scope.params,
       ...expScope.params]);
-    res.json(data);
+    res.json(data.map((r) => ({
+      ...r,
+      total_revenue: round2(r.total_revenue), total_discounts: round2(r.total_discounts), avg_order_value: round2(r.avg_order_value),
+      total_expenses: round2(r.total_expenses), drawer_expenses: round2(r.drawer_expenses), net_revenue: round2(r.net_revenue),
+    })));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -781,10 +805,10 @@ router.get('/net', requireUser, async (req, res) => {
       WHERE created_at::date BETWEEN ?::date AND ?::date${expScope.sql}
     `, [from, to, ...expScope.params]);
 
-    const revenue = revRow.revenue || 0;
-    const expenses = expRow.expenses || 0;
+    const revenue = round2(revRow.revenue || 0);
+    const expenses = round2(expRow.expenses || 0);
 
-    res.json({ revenue, expenses, net: revenue - expenses });
+    res.json({ revenue, expenses, net: round2(revenue - expenses) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
