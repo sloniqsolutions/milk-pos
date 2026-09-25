@@ -27,6 +27,14 @@ const RECHECK_MS = 4 * 60 * 60 * 1000;
 const { autoUpdater } = require('electron-updater');
 
 function initAutoUpdater(mainWindow, log) {
+  // electron-updater's own account of each step (download path, installer
+  // command line) goes into the till's log too.
+  autoUpdater.logger = {
+    info: (m) => log('[Updater] ' + m),
+    warn: (m) => log('[Updater WARN] ' + m),
+    error: (m) => log('[Updater ERROR] ' + m),
+    debug: (m) => log('[Updater debug] ' + m),
+  };
   autoUpdater.autoDownload = false;
   // Only takes effect once an update has actually been downloaded (the banner's
   // button): if the cashier downloads it and carries on selling, it installs
@@ -59,7 +67,7 @@ function initAutoUpdater(mainWindow, log) {
   });
 
   autoUpdater.on('update-downloaded', (info) => {
-    log('[Update] Version ' + info.version + ' downloaded, ready to install.');
+    log('[Update] Version ' + info.version + ' downloaded, ready to install: ' + info.downloadedFile);
     send('update-downloaded', { version: info.version });
   });
 
@@ -77,6 +85,7 @@ function initAutoUpdater(mainWindow, log) {
   ipcMain.handle('update-install', () => {
     // Silent, and reopen the app afterwards: the cashier clicks once and the till
     // comes back on the new version, instead of stopping at an installer wizard.
+    log('[Update] Restart & Install clicked — quitting and running the installer silently.');
     autoUpdater.quitAndInstall(true, true);
   });
 

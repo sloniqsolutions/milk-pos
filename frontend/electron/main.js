@@ -1,7 +1,48 @@
-const { app, BrowserWindow, ipcMain, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, dialog } = require('electron');
 const path = require('path');
-const { spawn } = require('child_process');
 const fs = require('fs');
+
+/*
+ * The till's log: %APPDATA%\pure-milk-pos\logs\main.log (main.old.log is the
+ * one before it). Appended to across launches, never cleared on start — a
+ * launch that fails right after an update must still be readable after the
+ * cashier has tried the shortcut again. Set up before anything else is
+ * required, so even a module that fails to load is recorded.
+ */
+const LOG_MAX_BYTES = 5 * 1024 * 1024;
+let logPath;
+try {
+  const logDir = path.join(app.getPath('userData'), 'logs');
+  fs.mkdirSync(logDir, { recursive: true });
+  logPath = path.join(logDir, 'main.log');
+  if (fs.existsSync(logPath) && fs.statSync(logPath).size > LOG_MAX_BYTES) {
+    fs.renameSync(logPath, path.join(logDir, 'main.old.log'));
+  }
+} catch (e) {
+  console.error('Could not create log file:', e.message);
+}
+
+function log(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}\n`;
+  console.log(msg);
+  try {
+    if (logPath) fs.appendFileSync(logPath, line);
+  } catch(e) {}
+}
+
+log(`===== launch v${app.getVersion()} pid=${process.pid} exe=${process.execPath} args=${JSON.stringify(process.argv.slice(1))}`);
+
+// Adding these replaces Electron's own "JavaScript error in the main process"
+// box, so the same box is shown again after the error is logged.
+process.on('uncaughtException', (err) => {
+  log('[Main] UNCAUGHT: ' + (err && err.stack ? err.stack : String(err)));
+  try { dialog.showErrorBox('Pure Milk POS error', String(err && err.stack ? err.stack : err)); } catch (e) {}
+});
+process.on('unhandledRejection', (reason) => {
+  log('[Main] UNHANDLED REJECTION: ' + (reason && reason.stack ? reason.stack : String(reason)));
+});
+
+const { spawn } = require('child_process');
 const http = require('http');
 const { buildReceiptBuffer } = require('./escpos-receipt');
 const { printRawBuffer } = require('./print-raw-windows');
@@ -11,19 +52,10 @@ const { resolveDataDir, migrateLegacyData } = require('./data-dir');
 let mainWindow;
 let backendProcess;
 let cloudProcess;
-let logPath;
 // Set once the renderer has confirmed there is no open shift (or the check
 // itself failed) — lets the close handler's own mainWindow.close() call fall
 // through instead of looping back into itself.
 let allowClose = false;
-
-function log(msg) {
-  const line = `[${new Date().toISOString()}] ${msg}\n`;
-  console.log(msg);
-  try {
-    if (logPath) fs.appendFileSync(logPath, line);
-  } catch(e) {}
-}
 
 /**
  * Bakes this shop's cloud pairing into every install, so a fresh machine is
@@ -62,6 +94,7 @@ function ensureCloudSyncConfig(dataDir) {
 
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
+  log('[Main] Another instance is already running — handing over to it and quitting.');
   app.quit();
 } else {
 
@@ -354,17 +387,6 @@ if (!gotTheLock) {
   }
 
   app.whenReady().then(async () => {
-    // Set up log path FIRST before anything else
-    const userDataPath = app.getPath('userData');
-    try {
-      if (!fs.existsSync(userDataPath)) fs.mkdirSync(userDataPath, { recursive: true });
-      logPath = path.join(userDataPath, 'backend-debug.log');
-      // Clear old log on each launch
-      fs.writeFileSync(logPath, '');
-    } catch(e) {
-      console.error('Could not create log file:', e.message);
-    }
-
     log('app.whenReady fired');
 
     if (!app.isPackaged) startCloud();
@@ -397,7 +419,7 @@ if (!gotTheLock) {
     if (process.platform !== 'darwin') app.quit();
   });
 
-  app.on('before-quit', () => { stopBackend(); stopCloud(); });
+  app.on('before-quit', () => { log('[Main] Quitting.'); stopBackend(); stopCloud(); });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

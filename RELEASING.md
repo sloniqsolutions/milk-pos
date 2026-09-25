@@ -69,6 +69,33 @@ Updates and reinstalls never touch it. In development it is `backend/` in the re
 **Never store data in the install folder.** The updater deletes that folder on
 every update.
 
+## When a till looks uninstalled after an update
+
+The update runs silently: the app closes, the old version is removed, and the new
+one is copied in with nothing on screen until the app reopens by itself. Tell the
+shop **not to reboot or reinstall** during that time.
+
+On the till, run `frontend/scripts/diagnose-install.ps1`
+(`powershell -ExecutionPolicy Bypass -File diagnose-install.ps1`). It changes
+nothing, and saves a report to the Desktop showing:
+- whether the installer is still running
+- whether the backend and `better_sqlite3.node` are intact
+- where each shortcut really points
+- the tail of the app's log
+
+The app's log is `%APPDATA%\pure-milk-pos\logs\main.log` (`main.old.log` is the
+previous one). It is kept across launches and includes the updater's own messages.
+
+Keep the frontend's runtime `dependencies` to what `electron/*.js` actually
+`require`s (today only `electron-updater`). Everything the renderer uses is
+bundled by Vite into `dist/`, so listing it under `dependencies` just ships it
+twice. With `asar: false`, it ships as one file per module. In 1.1.2 that was
+~20,000 extra files, and it made an update take ~23 minutes.
+
+`nsis/installer.nsh` recreates the desktop and Start-menu shortcuts on every
+install. Without it, an update leaves the desktop icon pointing at a deleted
+temp folder: Windows follows the old exe into the uninstaller's temp folder.
+
 ## Known limits
 
 - **Installs older than 1.0.3 cannot self-update.** They were built asking for a
