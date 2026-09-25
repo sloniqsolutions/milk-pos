@@ -2,7 +2,7 @@
   "name": "pure-milk-pos",
   "private": true,
   "type": "module",
-  "version": "1.0.4",
+  "version": "1.1.2",
   "description": "Pure Milk Point of Sale System",
   "author": "Pure Milk",
   "main": "electron/main.js",
@@ -146,6 +146,7 @@
       "icon": "electron/icons/icon.ico"
     },
     "nsis": {
+      "differentialPackage": false,
       "installerIcon": "electron/icons/icon.ico",
       "uninstallerIcon": "electron/icons/icon.ico",
       "oneClick": false,
