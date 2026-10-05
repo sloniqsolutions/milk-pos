@@ -175,6 +175,25 @@ function syncUpsert(localTable, row) {
   pushBatches(config, cloudTable, [row], localTable);
 }
 
+/**
+ * Like syncUpsert, but returns a Promise that resolves to true on success or
+ * false on failure. Used by inventory-entries.js to know whether to mark an
+ * entry as cloud_synced.
+ */
+function syncUpsertTracked(localTable, row) {
+  const cloudTable = INGEST_TABLE[localTable];
+  if (!cloudTable || !row) return Promise.resolve(false);
+  const config = readCloudConfig();
+  if (!config) return Promise.resolve(false);
+  return postGrouped(config, cloudTable, [row]).then((outcomes) => {
+    const failed = outcomes.filter((o) => o.status === 'rejected');
+    failed.forEach((o) => {
+      console.error(`[Cloud] sync ${localTable} failed:`, o.reason && o.reason.message);
+    });
+    return failed.length === 0;
+  }).catch(() => false);
+}
+
 /** Push several rows of the same table in as few requests as the 200-row cap allows. */
 function syncUpsertMany(localTable, rows) {
   const cloudTable = INGEST_TABLE[localTable];
@@ -340,4 +359,4 @@ async function pushInventoryEntriesResync() {
   return true;
 }
 
-module.exports = { pushInventoryEntriesResync, syncUpsert, syncUpsertMany, syncDelete, syncStaffDelete, syncExpenseDelete, syncMenuUpsert, pushInitialBackfill };
+module.exports = { pushInventoryEntriesResync, syncUpsert, syncUpsertTracked, syncUpsertMany, syncDelete, syncStaffDelete, syncExpenseDelete, syncMenuUpsert, pushInitialBackfill };

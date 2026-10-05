@@ -14,10 +14,14 @@
  * The cloud push happens after the surrounding transaction has committed
  * (flushEntryPushes), never from inside it — a sale that rolls back must not
  * leave a movement on the cloud.
+ *
+ * Each entry tracks whether it reached the cloud (cloud_synced). A periodic
+ * retry loop re-pushes any that failed, so a single dropped request no longer
+ * means the cloud is permanently out of sync.
  */
 
 const db = require('./database');
-const { syncUpsert } = require('./cloud-sync');
+const { syncUpsertTracked } = require('./cloud-sync');
 
 const bump = db.prepare('UPDATE ingredients SET stock = ROUND(stock + ?, 6) WHERE id = ?');
 const readStock = db.prepare('SELECT name, unit, stock FROM ingredients WHERE id = ?');
@@ -25,6 +29,9 @@ const insertEntry = db.prepare(`
   INSERT INTO inventory_entries (ingredient_id, type, amount, entry_date, created_at, order_id, order_item_id, reason)
   VALUES (?, ?, ?, ?, COALESCE(?, datetime('now', 'localtime')), ?, ?, ?)`);
 const getEntry = db.prepare('SELECT * FROM inventory_entries WHERE id = ?');
+const markSynced = db.prepare('UPDATE inventory_entries SET cloud_synced = 1 WHERE id = ?');
+const getUnsynced = db.prepare(
+  'SELECT * FROM inventory_entries WHERE cloud_synced = 0 ORDER BY id LIMIT 50');
 
 /** Six decimals: far finer than any real quantity, coarse enough to drop float dust. */
 const round6 = (n) => Math.round(Number(n) * 1e6) / 1e6;
@@ -67,17 +74,46 @@ function moveStock(ingredientId, type, amount, entryDate, opts = {}) {
   })();
 
   if (db.inTransaction) pendingPush.add(id);
-  else syncUpsert('inventory_entries', getEntry.get(id));
+  else pushAndTrack(id);
   return id;
+}
+
+function pushAndTrack(id) {
+  const row = getEntry.get(id);
+  if (!row) return;
+  syncUpsertTracked('inventory_entries', row).then((ok) => {
+    if (ok) markSynced.run(id);
+  });
 }
 
 /** Send the movements made inside a transaction that has now committed. A rolled-back one no longer exists and is skipped. */
 function flushEntryPushes() {
   for (const id of pendingPush) {
-    const row = getEntry.get(id);
-    if (row) syncUpsert('inventory_entries', row);
+    pushAndTrack(id);
   }
   pendingPush.clear();
 }
+
+let retryTimer = null;
+
+/** Re-push any inventory entries that never reached the cloud. */
+function retrySyncEntries() {
+  const rows = getUnsynced.all();
+  if (rows.length === 0) return;
+  console.log(`[Cloud] retrying ${rows.length} unsynced inventory entries…`);
+  for (const row of rows) {
+    syncUpsertTracked('inventory_entries', row).then((ok) => {
+      if (ok) markSynced.run(row.id);
+    });
+  }
+}
+
+function startRetryLoop() {
+  if (retryTimer) return;
+  retryTimer = setInterval(retrySyncEntries, 60_000);
+  retryTimer.unref();
+}
+
+startRetryLoop();
 
 module.exports = { moveStock, flushEntryPushes, InsufficientStockError, round6 };

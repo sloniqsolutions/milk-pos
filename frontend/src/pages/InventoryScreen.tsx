@@ -9,6 +9,8 @@ const BLUE = '#1B4C82';
 const BLUE_DARK = '#123A66';
 const BLUE_TINT = '#EAF2FB';
 
+const fmtStock = (n: number) => +n.toFixed(4);
+
 interface Ingredient {
   id: number;
   name: string;
@@ -350,7 +352,7 @@ export default function InventoryScreen() {
                             gap: 6
                           }}>
                             {isLowStock && <AlertCircle size={15} color="#EF4444" />}
-                            {ing.stock} {ing.unit}
+                            {fmtStock(ing.stock)} {ing.unit}
                           </span>
                         </div>
                       </td>
@@ -407,7 +409,7 @@ export default function InventoryScreen() {
           <form onSubmit={handleEditSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div style={{ background: BLUE_TINT, borderRadius: 8, padding: '10px 14px', border: '1px solid #C8DCED' }}>
               <span style={{ fontSize: 13, color: '#6B7280' }}>Current Stock: </span>
-              <strong style={{ fontSize: 15, color: BLUE_DARK }}>{selectedIngredient.stock} {selectedIngredient.unit}</strong>
+              <strong style={{ fontSize: 15, color: BLUE_DARK }}>{fmtStock(selectedIngredient.stock)} {selectedIngredient.unit}</strong>
             </div>
             
             <div>
@@ -476,10 +478,10 @@ export default function InventoryScreen() {
         <form onSubmit={handleConvertSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div style={{ background: BLUE_TINT, borderRadius: 8, padding: '10px 14px', border: '1px solid #C8DCED', display: 'flex', justifyContent: 'space-between' }}>
             <span style={{ fontSize: 13, color: '#6B7280' }}>
-              Milk in stock: <strong style={{ color: BLUE_DARK }}>{milkIngredient ? `${milkIngredient.stock} ${milkIngredient.unit}` : '—'}</strong>
+              Milk in stock: <strong style={{ color: BLUE_DARK }}>{milkIngredient ? `${fmtStock(milkIngredient.stock)} ${milkIngredient.unit}` : '—'}</strong>
             </span>
             <span style={{ fontSize: 13, color: '#6B7280' }}>
-              Yogurt in stock: <strong style={{ color: BLUE_DARK }}>{yogurtIngredient ? `${yogurtIngredient.stock} ${yogurtIngredient.unit}` : '—'}</strong>
+              Yogurt in stock: <strong style={{ color: BLUE_DARK }}>{yogurtIngredient ? `${fmtStock(yogurtIngredient.stock)} ${yogurtIngredient.unit}` : '—'}</strong>
             </span>
           </div>
           <div>
@@ -513,7 +515,7 @@ export default function InventoryScreen() {
               style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #E5E9F0', borderRadius: 8, fontSize: 14, background: '#F7F9FC', color: '#0F1720', outline: 'none', boxSizing: 'border-box' }}
             >
               {ingredients.map(ing => (
-                <option key={ing.id} value={ing.id}>{ing.name} ({ing.stock} {ing.unit} in stock)</option>
+                <option key={ing.id} value={ing.id}>{ing.name} ({fmtStock(ing.stock)} {ing.unit} in stock)</option>
               ))}
             </select>
           </div>

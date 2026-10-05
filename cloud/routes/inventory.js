@@ -199,11 +199,11 @@ router.put('/:branchId/:localId/stock', requireUser, async (req, res) => {
       // Recompute stock from every entry — the one true ledger.
       await client.query(`
         UPDATE ingredients i
-           SET stock = COALESCE((SELECT SUM(e.amount)
+           SET stock = ROUND(COALESCE((SELECT SUM(e.amount)
                                    FROM inventory_entries e
                                   WHERE e.branch_id = i.branch_id
                                     AND e.ingredient_local_id = i.local_id
-                                    AND e.superseded_by IS NULL), 0)
+                                    AND e.superseded_by IS NULL), 0)::numeric, 6)
          WHERE i.branch_id = $1 AND i.local_id = $2`, [branchId, localId]);
 
       const updated = await client.query(

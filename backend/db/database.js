@@ -685,6 +685,17 @@ try {
   console.error('Migration for Dahi sizes failed:', e.message);
 }
 
+// Track which inventory entries have been pushed to the cloud so failed pushes
+// can be retried (see db/inventory-entries.js's retrySyncEntries).
+try { db.exec("ALTER TABLE inventory_entries ADD COLUMN cloud_synced INTEGER DEFAULT 0;"); } catch(e) {}
+try {
+  const done = db.prepare("SELECT value FROM settings WHERE key = 'migration_cloud_synced_backfill'").get();
+  if (!done) {
+    db.exec("UPDATE inventory_entries SET cloud_synced = 1;");
+    db.prepare("INSERT INTO settings (key, value) VALUES ('migration_cloud_synced_backfill', '1') ON CONFLICT(key) DO UPDATE SET value = '1'").run();
+  }
+} catch(e) {}
+
 // ─── Auto Backup ────────────────────────────────────────────────────────────
 const backupDir = path.join(userDataDir, 'backups');
 if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });

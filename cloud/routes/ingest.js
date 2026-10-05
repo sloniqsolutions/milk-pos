@@ -267,13 +267,28 @@ async function dropDeletedCustomers(client, branchId) {
  * The cloud's stock for each ingredient is the sum of the stock entries it
  * holds for it — from every till — never a number a till pushed. Two tills
  * pushing "their" stock used to leave whichever pushed last on the dashboard.
+ *
+ * When ingredientLocalIds is given, only those ingredients are recalculated —
+ * this avoids locking every ingredient row on every push, which was the root
+ * cause of connection-pool exhaustion under burst sales (every concurrent
+ * entry ingest serialised on the full-table UPDATE, holding connections long
+ * enough to exhaust the pool and silently drop later pushes).
  */
-async function recomputeStock(client, branchId) {
-  await client.query(`
-    UPDATE ingredients i
-       SET stock = COALESCE((SELECT SUM(e.amount) FROM inventory_entries e
-                              WHERE e.branch_id = i.branch_id AND e.ingredient_local_id = i.local_id AND e.superseded_by IS NULL), 0)
-     WHERE i.branch_id = $1`, [branchId]);
+async function recomputeStock(client, branchId, ingredientLocalIds) {
+  if (ingredientLocalIds && ingredientLocalIds.length > 0) {
+    const unique = [...new Set(ingredientLocalIds)];
+    await client.query(`
+      UPDATE ingredients i
+         SET stock = ROUND(COALESCE((SELECT SUM(e.amount) FROM inventory_entries e
+                                WHERE e.branch_id = i.branch_id AND e.ingredient_local_id = i.local_id AND e.superseded_by IS NULL), 0)::numeric, 6)
+       WHERE i.branch_id = $1 AND i.local_id = ANY($2)`, [branchId, unique]);
+  } else {
+    await client.query(`
+      UPDATE ingredients i
+         SET stock = ROUND(COALESCE((SELECT SUM(e.amount) FROM inventory_entries e
+                                WHERE e.branch_id = i.branch_id AND e.ingredient_local_id = i.local_id AND e.superseded_by IS NULL), 0)::numeric, 6)
+       WHERE i.branch_id = $1`, [branchId]);
+  }
 }
 
 /**
@@ -336,8 +351,11 @@ async function ingestInventoryEntries(client, branchId, rows, receivedAt, device
   const existing = await client.query(
     'SELECT local_id, name FROM ingredients WHERE branch_id = $1', [branchId]);
   const idByName = new Map(existing.rows.map(r => [String(r.name), Number(r.local_id)]));
+  const affectedIngredients = [];
   const resolved = rows.map((r) => {
     const canonical = r.ingredient_name != null ? idByName.get(String(r.ingredient_name)) : undefined;
+    const ingredientId = canonical != null ? canonical : num(r.ingredient_id);
+    if (ingredientId != null) affectedIngredients.push(ingredientId);
     return canonical != null ? { ...r, ingredient_id: canonical } : r;
   });
   const { sql, params } = buildUpsert(
@@ -346,7 +364,7 @@ async function ingestInventoryEntries(client, branchId, rows, receivedAt, device
       num(r.order_id), num(r.order_item_id), str(r.reason), num(r.superseded_by)],
     receivedAt, branchId, deviceId);
   await client.query(sql, params);
-  await recomputeStock(client, branchId);
+  await recomputeStock(client, branchId, affectedIngredients);
 }
 
 /** Where cloud-created rows' numbers start — see routes/customers.js's copy of this constant. */
