@@ -135,7 +135,14 @@ export default function InventoryScreen() {
     if (!selectedIngredient) return;
 
     try {
-      // 1. Update stock if amount is provided
+      // 1. Update threshold if changed (before stock, so a threshold edit
+      // is not lost if the stock call fails for any reason).
+      const currentThreshold = parseFloat(editThreshold);
+      if (!isNaN(currentThreshold) && currentThreshold !== selectedIngredient.low_stock_threshold) {
+        await inventoryAPI.updateThreshold(selectedIngredient.id, currentThreshold);
+      }
+
+      // 2. Update stock if amount is provided
       if (editAmount !== '') {
         const amt = parseFloat(editAmount);
         if (!isNaN(amt)) {
@@ -147,16 +154,16 @@ export default function InventoryScreen() {
         }
       }
 
-      // 2. Update threshold if changed
-      const currentThreshold = parseFloat(editThreshold);
-      if (!isNaN(currentThreshold) && currentThreshold !== selectedIngredient.low_stock_threshold) {
-        await inventoryAPI.updateThreshold(selectedIngredient.id, currentThreshold);
-      }
-
       setShowEditModal(false);
       fetchInventory();
     } catch (err) {
       console.error(err);
+      // Refresh anyway: step 1 may have saved before step 2 failed.
+      fetchInventory();
+      alertCard({
+        title: 'Could not save changes',
+        message: err instanceof Error ? err.message : 'Failed to update ingredient',
+      });
     }
   };
 

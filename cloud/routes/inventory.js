@@ -6,15 +6,19 @@
  * edit doesn't get silently undone by the other's next push, and a
  * tombstone table so a dashboard delete sticks.
  *
- * The one thing this deliberately does NOT let the dashboard touch: stock.
- * A shop's real physical stock only changes through something that actually
- * happened at the till — a sale, a delivery entered on the Inventory screen,
- * a Convert-to-Yogurt, reported waste. The dashboard is not at the shop, so
- * it has no physical stock to report; editing the number from here would
- * just make it wrong. Stock stays till-derived and keeps flowing up through
- * the existing ingest push (routes/ingest.js) regardless of what this file
- * does to the rest of the row — see that file's ingredient handler for how
- * the two are kept from fighting each other.
+ * Stock adjustments (add/subtract/set) are allowed from the dashboard —
+ * the admin can record a delivery or correct a count. Each adjustment
+ * creates a real inventory_entry (type 'stock', device_id 'cloud') and
+ * recomputes the ingredient's stock from the full entry ledger, so the
+ * number is always the sum of all entries from every source.
+ *
+ * These cloud-created entries live on the cloud only. The till's own stock
+ * remains its own local sum and is not affected — the two views converge
+ * on the dashboard, which sees everything, while each till sees only what
+ * physically happened at that till.
+ *
+ * Yogurt conversion and waste stay till-only: those are physical events
+ * that happen at the shop, not something to log remotely.
  */
 
 const express = require('express');
@@ -91,6 +95,131 @@ router.post('/', requireUser, async (req, res) => {
   }
 });
 
+/* ------------------------------------------------ stock adjustment (cloud) */
+
+/**
+ * PUT /api/inventory/:branchId/:localId/stock — the admin adjusts stock from
+ * the dashboard, the same way the till's own PUT /:id/stock does locally.
+ *
+ * Creates a real inventory_entry (type 'stock') and recomputes the ingredient's
+ * stock from its entries, so the number is always the sum of the ledger.  The
+ * entry shows up in the dashboard's Stock History screen under "Restocks" and
+ * in the stock-movement report — exactly like a restock entered at the till.
+ *
+ * These entries live on the cloud only.  The till's own stock remains its own
+ * local sum; it is not affected.  That is intentional: a correction made here
+ * means "I know the real number", and the till's entries continue reflecting
+ * whatever physically happened there.
+ */
+const MAX_AMOUNT = 10000000;
+const round6 = (n) => Math.round(Number(n) * 1e6) / 1e6;
+const today = () => new Date().toLocaleDateString('en-CA');
+
+/** Basic date guard — same rules as backend/db/validate.js's checkEntryDay. */
+function checkEntryDay(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return 'Enter the date as YYYY-MM-DD.';
+  const [y, m, d] = value.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  if (date.getFullYear() !== y || date.getMonth() !== m - 1 || date.getDate() !== d) return 'That is not a real calendar day.';
+  if (value < '2020-01-01') return 'That date is too far in the past.';
+  const tomorrow = new Date(Date.now() + 24 * 3600 * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  const limit = `${tomorrow.getFullYear()}-${pad(tomorrow.getMonth() + 1)}-${pad(tomorrow.getDate())}`;
+  if (value > limit) return 'That date is in the future.';
+  return null;
+}
+
+router.put('/:branchId/:localId/stock', requireUser, async (req, res) => {
+  const branchId = Number(req.params.branchId);
+  const localId = Number(req.params.localId);
+  const body = req.body || {};
+  if (!Number.isFinite(branchId) || !Number.isFinite(localId)) {
+    return res.status(400).json({ error: 'Bad ingredient address.' });
+  }
+
+  try {
+    const ingredient = await db.one(
+      'SELECT local_id, name, unit, stock FROM ingredients WHERE branch_id = $1 AND local_id = $2',
+      [branchId, localId]);
+    if (!ingredient) return res.status(404).json({ error: 'No such ingredient.' });
+
+    const { action, amount: rawAmount, stock: rawStock, date } = body;
+    const dayProblem = checkEntryDay(date);
+    if (dayProblem) return res.status(400).json({ error: dayProblem });
+
+    let change;
+    let reason = null;
+
+    if (action === 'add' || action === 'subtract') {
+      const delta = num(rawAmount);
+      if (!(delta > 0) || delta > MAX_AMOUNT) {
+        return res.status(400).json({ error: 'Enter an amount greater than zero.' });
+      }
+      if (action === 'subtract' && delta > Number(ingredient.stock)) {
+        return res.status(400).json({
+          error: `You can't remove ${delta} ${ingredient.unit} — only ${ingredient.stock} ${ingredient.unit} of ${ingredient.name} is in stock.`,
+          code: 'INSUFFICIENT_STOCK',
+        });
+      }
+      change = action === 'add' ? delta : -delta;
+    } else if (rawStock !== undefined) {
+      const counted = num(rawStock);
+      if (!(counted >= 0) || counted > MAX_AMOUNT) {
+        return res.status(400).json({ error: 'Stock must be zero or more.' });
+      }
+      change = round6(counted - Number(ingredient.stock));
+      reason = 'Recount';
+    } else {
+      return res.status(400).json({ error: 'Choose whether to add stock, remove stock, or set the count.' });
+    }
+
+    if (round6(change) === 0) {
+      return res.json({ success: true, stock: Number(ingredient.stock) });
+    }
+
+    const entryDate = date || today();
+    const now = Date.now();
+
+    const newStock = await db.tx(async (client) => {
+      // Allocate a local_id for this cloud-created entry.
+      const nextRow = await client.query(
+        `SELECT COALESCE(MAX(local_id), 0) + 1 AS next_id
+           FROM inventory_entries
+          WHERE branch_id = $1 AND device_id = 'cloud'`, [branchId]);
+      const entryLocalId = Number(nextRow.rows[0].next_id);
+
+      await client.query(
+        `INSERT INTO inventory_entries
+           (branch_id, local_id, device_id, ingredient_local_id, type, amount, entry_date, created_at, received_at, reason)
+         VALUES ($1, $2, 'cloud', $3, 'stock', $4, $5, $6, $7, $8)`,
+        [branchId, entryLocalId, localId, round6(change), entryDate,
+         new Date().toISOString(), now, reason]);
+
+      // Recompute stock from every entry — the one true ledger.
+      await client.query(`
+        UPDATE ingredients i
+           SET stock = COALESCE((SELECT SUM(e.amount)
+                                   FROM inventory_entries e
+                                  WHERE e.branch_id = i.branch_id
+                                    AND e.ingredient_local_id = i.local_id
+                                    AND e.superseded_by IS NULL), 0)
+         WHERE i.branch_id = $1 AND i.local_id = $2`, [branchId, localId]);
+
+      const updated = await client.query(
+        'SELECT stock FROM ingredients WHERE branch_id = $1 AND local_id = $2',
+        [branchId, localId]);
+      return Number(updated.rows[0].stock);
+    });
+
+    res.json({ success: true, stock: newStock });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ------------------------------------------------ metadata update (cloud) */
+
 router.put('/:branchId/:localId', requireUser, async (req, res) => {
   const branchId = Number(req.params.branchId);
   const localId = Number(req.params.localId);
@@ -99,7 +228,7 @@ router.put('/:branchId/:localId', requireUser, async (req, res) => {
     return res.status(400).json({ error: 'Bad ingredient address.' });
   }
   if (body.stock !== undefined) {
-    return res.status(400).json({ error: "Stock is recorded at the till, not here — it reflects what's physically on the shelf." });
+    return res.status(400).json({ error: 'Use the stock adjustment (PUT …/stock) to change stock. This route is for name, unit, threshold and cost.' });
   }
 
   try {

@@ -182,12 +182,9 @@ export const inventoryAPI = {
   getAll: () => request('GET', '/inventory'),
   lowStock: () => request('GET', '/inventory').then(
     rows => rows.filter(r => Number(r.stock) <= Number(r.low_stock_threshold))),
-  // Real writes now for everything except stock itself — see
-  // cloud/routes/inventory.js for why stock stays till-only (it's a real
-  // physical count; the dashboard isn't at the shop to have counted it).
   // branch_id injected the same way staffAPI.create does below.
   create: (data) => request('POST', '/inventory', { branch_id: 1, ...data }),
-  updateStock: readOnly('Stock'),
+  updateStock: (id, body) => request('PUT', `/inventory/1/${id}/stock`, body),
   updateThreshold: (id, threshold) => request('PUT', `/inventory/1/${id}`, { low_stock_threshold: threshold }),
   delete: (id) => request('DELETE', `/inventory/1/${id}`),
   // Real read now — see cloud/routes/inventory.js's GET /history, and
