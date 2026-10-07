@@ -116,7 +116,7 @@ export default function CustomersScreen() {
         { h: 'Orders', cell: c => c.period_orders, style: { ...td, color: '#374151' } },
         { h: 'Credited', right: true, cell: c => money(c.total_credited), style: { ...td, textAlign: 'right', color: '#374151' } },
         { h: 'Paid', right: true, cell: c => money(c.total_paid), style: { ...td, textAlign: 'right', color: '#16A34A' } },
-        { h: 'Balance', right: true, cell: c => money(c.balance), style: { ...td, textAlign: 'right', fontWeight: 700, color: (c.balance || 0) > 0 ? '#B45309' : '#111827' } },
+        { h: 'Balance', right: true, cell: c => (<span style={{ color: (c.balance || 0) > 0 ? '#B45309' : '#111827' }}>{money(c.balance)}</span>), style: { ...td, textAlign: 'right', fontWeight: 700 } },
         { h: 'Last order', cell: c => when(c.last_order_at), style: { ...td, color: '#374151', whiteSpace: 'nowrap' } },
       ]
     : [
@@ -128,7 +128,7 @@ export default function CustomersScreen() {
         { h: 'Litres', right: true, cell: c => `${Number(c.total_litres || 0).toFixed(1)} L`, style: { ...td, textAlign: 'right', color: '#374151' } },
         { h: 'Credited', right: true, cell: c => money(c.total_credited), style: { ...td, textAlign: 'right', color: '#374151' } },
         { h: 'Paid', right: true, cell: c => money(c.total_paid), style: { ...td, textAlign: 'right', color: '#16A34A' } },
-        { h: 'Balance', right: true, cell: c => money(c.balance), style: { ...td, textAlign: 'right', fontWeight: 700, color: (c.balance || 0) > 0 ? '#B45309' : '#111827' } },
+        { h: 'Balance', right: true, cell: c => (<span style={{ color: (c.balance || 0) > 0 ? '#B45309' : '#111827' }}>{money(c.balance)}</span>), style: { ...td, textAlign: 'right', fontWeight: 700 } },
         { h: 'Last order', cell: c => String(c.last_order_at || '').slice(0, 10) || '—', style: { ...td, color: '#9CA3AF', whiteSpace: 'nowrap' } },
         { h: 'Days ago', cell: c => daysLabel(c.days), style: { ...td, color: '#374151', whiteSpace: 'nowrap' } },
         { h: 'Branches', cell: c => c.branches || '—', style: { ...td, color: '#6B7280' } },
