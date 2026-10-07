@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import BranchFilter from './BranchFilter';
+import { SORTS, sortCustomers, daysLabel, localDay } from './customerSort';
 
 /**
  * Credit customers.
@@ -36,6 +37,7 @@ export default function CustomersScreen() {
   const [rows, setRows] = useState([]);
   const [totals, setTotals] = useState({ customers: 0, outstanding: 0, owing: 0, litres: 0 });
   const [search, setSearch] = useState('');
+  const [sortKey, setSortKey] = useState('balance');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -70,12 +72,14 @@ export default function CustomersScreen() {
   }, [branchId]);
 
   const term = search.trim().toLowerCase();
-  const visible = term
+  const matching = term
     ? rows.filter(r =>
         String(r.name || '').toLowerCase().includes(term) ||
         String(r.phone || '').replace(/\D/g, '').includes(term.replace(/\D/g, '')) ||
         String(r.address || '').toLowerCase().includes(term))
     : rows;
+  // Display order only — the rows themselves are exactly what the cloud sent.
+  const visible = sortCustomers(matching, sortKey, localDay());
 
   return (
     <div style={{ padding: 24, maxWidth: 1200, margin: '0 auto' }}>
@@ -90,6 +94,17 @@ export default function CustomersScreen() {
             padding: '0 12px', fontSize: 14, outline: 'none', fontFamily: 'inherit',
           }}
         />
+        <select
+          value={sortKey}
+          onChange={e => setSortKey(e.target.value)}
+          aria-label="Sort customers"
+          style={{
+            height: 36, borderRadius: 8, border: '1px solid #D1D5DB', padding: '0 10px',
+            fontSize: 14, background: '#FFFFFF', color: '#111827', fontFamily: 'inherit',
+          }}
+        >
+          {SORTS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+        </select>
       </div>
 
       {error && (
@@ -132,7 +147,7 @@ export default function CustomersScreen() {
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
               <thead>
                 <tr style={{ borderBottom: '1px solid #E5E9F0' }}>
-                  {['Name', 'Phone', 'Address', 'Litres', 'Credited', 'Paid', 'Balance', 'Last order', 'Branches']
+                  {['Name', 'Phone', 'Address', 'Litres', 'Credited', 'Paid', 'Balance', 'Last order', 'Days ago', 'Branches']
                     .map((h, i) => (
                       <th key={h} style={{
                         textAlign: i >= 3 && i <= 6 ? 'right' : 'left', padding: '8px 10px',
@@ -180,6 +195,9 @@ export default function CustomersScreen() {
                     </td>
                     <td style={{ padding: '8px 10px', color: '#9CA3AF', whiteSpace: 'nowrap' }}>
                       {String(c.last_order_at || '').slice(0, 10) || '—'}
+                    </td>
+                    <td style={{ padding: '8px 10px', color: '#374151', whiteSpace: 'nowrap' }}>
+                      {daysLabel(c.days)}
                     </td>
                     <td style={{ padding: '8px 10px', color: '#6B7280' }}>
                       {c.branches || '—'}
