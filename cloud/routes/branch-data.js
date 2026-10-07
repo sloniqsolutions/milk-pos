@@ -334,6 +334,48 @@ router.get('/inventory', requireUser, async (req, res) => {
  */
 router.get('/customers', requireUser, async (req, res) => {
   const s = scope(req, 'c');
+
+  /*
+   * Optional period (?from=YYYY-MM-DD&to=YYYY-MM-DD), read-only. When given, each
+   * customer also carries `period_orders`: how many completed credit orders they
+   * actually had in that period, counted from the orders themselves. The saved
+   * `last_order_at` cannot answer this — someone who ordered on the 3rd and again
+   * on the 6th would fall out of a "1st to 5th" range if only the last date counted.
+   *
+   * Orders here carry the customer's name and phone, not an id, so an order is
+   * matched to a person by phone digits (7 or more) or, failing that, by name,
+   * within the same branch. Without `from` and `to` nothing here runs.
+   */
+  const DAY = /^\d{4}-\d{2}-\d{2}$/;
+  const { from, to } = req.query;
+  const hasPeriod = from !== undefined || to !== undefined;
+  if (hasPeriod) {
+    if (!DAY.test(String(from || '')) || !DAY.test(String(to || ''))) {
+      return res.status(400).json({ error: 'Choose both dates as YYYY-MM-DD.' });
+    }
+    if (String(from) > String(to)) {
+      return res.status(400).json({ error: 'The start date is after the end date.' });
+    }
+  }
+  const periodCte = hasPeriod ? `, period AS (
+        SELECT g.group_key, COUNT(DISTINCT o.id)::int AS period_orders
+          FROM (SELECT DISTINCT group_key, branch_id,
+                       LOWER(BTRIM(COALESCE(name, ''))) AS lname,
+                       REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g') AS digits
+                  FROM keyed) g
+          JOIN orders o
+            ON o.branch_id = g.branch_id
+           AND o.status = 'completed' AND o.payment_method = 'Credit'
+           AND o.created_at::date BETWEEN ?::date AND ?::date
+           AND ((LENGTH(g.digits) >= 7
+                 AND REGEXP_REPLACE(COALESCE(o.customer_phone, ''), '[^0-9]', '', 'g') = g.digits)
+                OR (g.lname <> '' AND LOWER(BTRIM(COALESCE(o.customer_name, ''))) = g.lname))
+         GROUP BY g.group_key
+      )` : '';
+  const periodSelect = hasPeriod ? 'COALESCE(MAX(pe.period_orders), 0)::int AS period_orders,' : '';
+  const periodJoin = hasPeriod ? 'LEFT JOIN period pe ON pe.group_key = pb.group_key' : '';
+  const periodParams = hasPeriod ? [String(from), String(to)] : [];
+
   try {
     /*
      * One row per PERSON. The cloud keeps a customer once per till that pushed
@@ -373,8 +415,9 @@ router.get('/customers', requireUser, async (req, res) => {
                MAX(total_litres)   AS total_litres
           FROM keyed
          GROUP BY group_key, branch_id
-      )
+      )${periodCte}
       SELECT
+        ${periodSelect}
         pb.group_key,
         MAX(pb.name)                      AS name,
         MAX(pb.phone)                     AS phone,
@@ -393,9 +436,10 @@ router.get('/customers', requireUser, async (req, res) => {
         STRING_AGG(DISTINCT b.name, ', ') AS branches
       FROM per_branch pb
       LEFT JOIN branches b ON b.id = pb.branch_id
+      ${periodJoin}
       GROUP BY pb.group_key
       ORDER BY SUM(pb.balance) DESC, MAX(pb.last_order_at) DESC
-    `, s.params);
+    `, [...s.params, ...periodParams]);
 
     const totals = {
       customers: rows.length,

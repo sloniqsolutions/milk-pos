@@ -28,6 +28,43 @@ export function localDay(now = new Date()) {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
+/** The calendar day `n` days before `day` (YYYY-MM-DD), by plain date arithmetic. */
+export function daysBefore(day, n) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day || ''));
+  if (!m) return null;
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3] - n));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+export const PERIODS = [
+  { key: 'all', label: 'All' },
+  { key: 'today', label: 'Today' },
+  { key: 'days3', label: '3 Days' },
+  { key: 'week', label: 'Week' },
+  { key: 'month', label: 'Month' },
+  { key: 'custom', label: 'Custom' },
+];
+
+/**
+ * The inclusive from/to for a period, ending today — the same convention as the Reports tab
+ * (a "week" is today and the six days before it). null for "All", and for a custom range
+ * that is incomplete or backwards, so nothing is asked of the cloud until it makes sense.
+ */
+export function periodRange(key, today, custom = {}) {
+  switch (key) {
+    case 'today': return { from: today, to: today };
+    case 'days3': return { from: daysBefore(today, 2), to: today };
+    case 'week': return { from: daysBefore(today, 6), to: today };
+    case 'month': return { from: daysBefore(today, 29), to: today };
+    case 'custom': {
+      const ok = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+      if (!ok(custom.from) || !ok(custom.to) || custom.from > custom.to) return null;
+      return { from: custom.from, to: custom.to };
+    }
+    default: return null;
+  }
+}
+
 /** "Today", "1 day ago", "12 days ago" — or an em dash when there has never been an order. */
 export function daysLabel(days) {
   if (days == null) return '—';

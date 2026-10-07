@@ -1,6 +1,34 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { daysSince, daysLabel, localDay, sortCustomers } from '../src/customerSort.js';
+import { daysSince, daysLabel, localDay, sortCustomers, daysBefore, periodRange } from '../src/customerSort.js';
+
+test('daysBefore steps back across month, year and leap-day boundaries', () => {
+  assert.equal(daysBefore('2026-10-07', 0), '2026-10-07');
+  assert.equal(daysBefore('2026-10-07', 6), '2026-10-01');
+  assert.equal(daysBefore('2026-10-07', 7), '2026-09-30');
+  assert.equal(daysBefore('2026-01-02', 2), '2025-12-31');
+  assert.equal(daysBefore('2024-03-01', 1), '2024-02-29');
+  assert.equal(daysBefore('2026-03-01', 1), '2026-02-28');
+  assert.equal(daysBefore('nope', 1), null);
+});
+
+test('period ranges are inclusive and end today, like the Reports tab', () => {
+  const T = '2026-10-07';
+  assert.deepEqual(periodRange('today', T), { from: '2026-10-07', to: '2026-10-07' });
+  assert.deepEqual(periodRange('days3', T), { from: '2026-10-05', to: '2026-10-07' });
+  assert.deepEqual(periodRange('week', T), { from: '2026-10-01', to: '2026-10-07' });
+  assert.deepEqual(periodRange('month', T), { from: '2026-09-08', to: '2026-10-07' });
+  assert.equal(periodRange('all', T), null);
+});
+
+test('a custom range is used only when both dates are real and in order', () => {
+  const T = '2026-10-07';
+  assert.deepEqual(periodRange('custom', T, { from: '2026-10-01', to: '2026-10-05' }), { from: '2026-10-01', to: '2026-10-05' });
+  assert.deepEqual(periodRange('custom', T, { from: '2026-10-03', to: '2026-10-03' }), { from: '2026-10-03', to: '2026-10-03' });
+  assert.equal(periodRange('custom', T, { from: '2026-10-05', to: '2026-10-01' }), null);
+  assert.equal(periodRange('custom', T, { from: '2026-10-05', to: '' }), null);
+  assert.equal(periodRange('custom', T, {}), null);
+});
 
 const TODAY = '2026-10-07';
 

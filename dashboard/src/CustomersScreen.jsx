@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import BranchFilter from './BranchFilter';
-import { SORTS, sortCustomers, daysLabel, localDay } from './customerSort';
+import { SORTS, PERIODS, sortCustomers, daysLabel, localDay, periodRange } from './customerSort';
 
 /**
  * Credit customers.
@@ -38,15 +38,27 @@ export default function CustomersScreen() {
   const [totals, setTotals] = useState({ customers: 0, outstanding: 0, owing: 0, litres: 0 });
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState('balance');
+  const [period, setPeriod] = useState('all');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  // The period is asked of the cloud, which counts each customer's real credit orders in it.
+  // "All", or a custom range not yet complete, asks for nothing extra.
+  const range = periodRange(period, localDay(), { from: customFrom, to: customTo });
+  const rangeFrom = range ? range.from : '';
+  const rangeTo = range ? range.to : '';
 
   useEffect(() => {
     let cancelled = false;
 
     const load = (silent) => {
       if (!silent) setLoading(true);
-      const qs = branchId ? `?branch=${branchId}` : '';
+      const q = new URLSearchParams();
+      if (branchId) q.set('branch', branchId);
+      if (rangeFrom && rangeTo) { q.set('from', rangeFrom); q.set('to', rangeTo); }
+      const qs = q.toString() ? `?${q}` : '';
       fetch(`/api/customers${qs}`, { credentials: 'include' })
         .then(async (r) => {
           const data = await r.json();
@@ -69,15 +81,21 @@ export default function CustomersScreen() {
     const poll = setInterval(() => load(true), 15000);
 
     return () => { cancelled = true; clearInterval(poll); };
-  }, [branchId]);
+  }, [branchId, rangeFrom, rangeTo]);
+
+  // Only people who really had a credit order in the chosen period. An older cloud that
+  // cannot count them is said so on screen rather than quietly showing everybody.
+  const periodActive = Boolean(rangeFrom && rangeTo);
+  const periodSupported = !periodActive || rows.length === 0 || rows[0].period_orders !== undefined;
+  const inPeriod = periodActive && periodSupported ? rows.filter(r => (r.period_orders || 0) > 0) : rows;
 
   const term = search.trim().toLowerCase();
   const matching = term
-    ? rows.filter(r =>
+    ? inPeriod.filter(r =>
         String(r.name || '').toLowerCase().includes(term) ||
         String(r.phone || '').replace(/\D/g, '').includes(term.replace(/\D/g, '')) ||
         String(r.address || '').toLowerCase().includes(term))
-    : rows;
+    : inPeriod;
   // Display order only — the rows themselves are exactly what the cloud sent.
   const visible = sortCustomers(matching, sortKey, localDay());
 
@@ -106,6 +124,41 @@ export default function CustomersScreen() {
           {SORTS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
         </select>
       </div>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
+        {PERIODS.map(p => (
+          <button
+            key={p.key}
+            onClick={() => setPeriod(p.key)}
+            style={{
+              padding: '6px 14px', borderRadius: 999, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+              fontFamily: 'inherit',
+              background: period === p.key ? '#1B4C82' : '#FFFFFF',
+              color: period === p.key ? '#FFFFFF' : '#6B7280',
+              border: period === p.key ? '1px solid #1B4C82' : '1px solid #D1D5DB',
+            }}
+          >
+            {p.label}
+          </button>
+        ))}
+        {period === 'custom' && (
+          <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center', marginLeft: 4 }}>
+            <input type="date" value={customFrom} max={customTo || undefined} onChange={e => setCustomFrom(e.target.value)}
+              aria-label="From date"
+              style={{ height: 32, borderRadius: 8, border: '1px solid #D1D5DB', padding: '0 8px', fontSize: 13, fontFamily: 'inherit' }} />
+            <span style={{ color: '#9CA3AF', fontSize: 13 }}>to</span>
+            <input type="date" value={customTo} min={customFrom || undefined} onChange={e => setCustomTo(e.target.value)}
+              aria-label="To date"
+              style={{ height: 32, borderRadius: 8, border: '1px solid #D1D5DB', padding: '0 8px', fontSize: 13, fontFamily: 'inherit' }} />
+          </span>
+        )}
+      </div>
+      <p style={{ margin: '0 0 20px', fontSize: 12, color: '#6B7280' }}>
+        {period === 'all' && 'Showing every credit customer.'}
+        {period !== 'all' && !periodActive && 'Pick both dates to see who ordered in that range.'}
+        {periodActive && !periodSupported && 'This cloud version cannot filter by period yet, so every customer is shown.'}
+        {periodActive && periodSupported && `Showing customers with at least one credit order from ${rangeFrom} to ${rangeTo}.`}
+      </p>
 
       {error && (
         <div style={{
@@ -139,7 +192,9 @@ export default function CustomersScreen() {
         ) : !visible.length ? (
           <p style={{ color: '#9CA3AF', fontSize: 14, margin: 0 }}>
             {rows.length
-              ? 'Nobody matches that search.'
+              ? (periodActive && periodSupported && !term
+                  ? 'No customer had a credit order in this period.'
+                  : 'Nobody matches that search.')
               : 'No credit customers yet. They are added at the till, on the Customers screen.'}
           </p>
         ) : (
@@ -147,7 +202,7 @@ export default function CustomersScreen() {
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
               <thead>
                 <tr style={{ borderBottom: '1px solid #E5E9F0' }}>
-                  {['Name', 'Phone', 'Address', 'Litres', 'Credited', 'Paid', 'Balance', 'Last order', 'Days ago', 'Branches']
+                  {['Name', 'Phone', 'Address', 'Litres', 'Credited', 'Paid', 'Balance', 'Last order', 'Days ago', ...(periodActive && periodSupported ? ['Orders in period'] : []), 'Branches']
                     .map((h, i) => (
                       <th key={h} style={{
                         textAlign: i >= 3 && i <= 6 ? 'right' : 'left', padding: '8px 10px',
@@ -199,6 +254,9 @@ export default function CustomersScreen() {
                     <td style={{ padding: '8px 10px', color: '#374151', whiteSpace: 'nowrap' }}>
                       {daysLabel(c.days)}
                     </td>
+                    {periodActive && periodSupported && (
+                      <td style={{ padding: '8px 10px', color: '#374151' }}>{c.period_orders}</td>
+                    )}
                     <td style={{ padding: '8px 10px', color: '#6B7280' }}>
                       {c.branches || '—'}
                     </td>
