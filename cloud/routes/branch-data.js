@@ -357,23 +357,74 @@ router.get('/customers', requireUser, async (req, res) => {
       return res.status(400).json({ error: 'The start date is after the end date.' });
     }
   }
-  const periodCte = hasPeriod ? `, period AS (
-        SELECT g.group_key, COUNT(DISTINCT o.id)::int AS period_orders
-          FROM (SELECT DISTINCT group_key, branch_id,
-                       LOWER(BTRIM(COALESCE(name, ''))) AS lname,
-                       REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g') AS digits
-                  FROM keyed) g
+  /*
+   * What the period needs per person, all from the cloud's own orders and payments:
+   *   period_orders / period_credited  — completed credit orders in the period, and their total
+   *   period_payments / period_paid    — payments received in the period, and their total
+   *   period_last_order_at             — the latest of those orders
+   *   closing_balance                  — the balance as it stood at the end of the period: the
+   *                                      balance the till reports now, undone for what was credited
+   *                                      and paid AFTER the period. For a period ending today that
+   *                                      is exactly the till's current balance.
+   * A payment is matched to a person through the customer row it was recorded against
+   * (same branch, till and customer number); an order, by phone or name as above.
+   */
+  const periodCte = hasPeriod ? `, rng AS (SELECT ?::date AS f, ?::date AS t),
+      people AS (
+        SELECT DISTINCT group_key, branch_id,
+               LOWER(BTRIM(COALESCE(name, ''))) AS lname,
+               REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g') AS digits
+          FROM keyed
+      ), ord AS (
+        SELECT DISTINCT g.group_key, o.id, o.total::float8 AS total, o.created_at
+          FROM people g
           JOIN orders o
             ON o.branch_id = g.branch_id
            AND o.status = 'completed' AND o.payment_method = 'Credit'
-           AND o.created_at::date BETWEEN ?::date AND ?::date
            AND ((LENGTH(g.digits) >= 7
                  AND REGEXP_REPLACE(COALESCE(o.customer_phone, ''), '[^0-9]', '', 'g') = g.digits)
                 OR (g.lname <> '' AND LOWER(BTRIM(COALESCE(o.customer_name, ''))) = g.lname))
-         GROUP BY g.group_key
+      ), pay AS (
+        SELECT DISTINCT k.group_key, p.id, p.amount::float8 AS amount, p.created_at
+          FROM keyed k
+          JOIN credit_payments p
+            ON p.branch_id = k.branch_id AND p.customer_local_id = k.local_id
+           -- A restored till keeps the customer numbers it was given but pushes payments under its
+           -- own device id, so a customer filed under another device (or "legacy") would never match
+           -- on device. Same device wins; otherwise the number is used only when no customer exists
+           -- under the payment's own device AND the number belongs to exactly one person — so two
+           -- different people who happen to share a number can never be mixed up.
+           AND (COALESCE(p.device_id, 'legacy') = COALESCE(k.device_id, 'legacy')
+                OR (NOT EXISTS (SELECT 1 FROM keyed x
+                                 WHERE x.branch_id = p.branch_id AND x.local_id = p.customer_local_id
+                                   AND COALESCE(x.device_id, 'legacy') = COALESCE(p.device_id, 'legacy'))
+                    AND (SELECT COUNT(DISTINCT x.group_key) FROM keyed x
+                          WHERE x.branch_id = p.branch_id AND x.local_id = p.customer_local_id) = 1))
+      ), ord_agg AS (
+        SELECT ord.group_key,
+               COUNT(*) FILTER (WHERE ord.created_at::date BETWEEN rng.f AND rng.t)::int AS period_orders,
+               COALESCE(SUM(ord.total) FILTER (WHERE ord.created_at::date BETWEEN rng.f AND rng.t), 0)::float8 AS period_credited,
+               MAX(ord.created_at) FILTER (WHERE ord.created_at::date BETWEEN rng.f AND rng.t) AS period_last_order_at,
+               COALESCE(SUM(ord.total) FILTER (WHERE ord.created_at::date > rng.t), 0)::float8 AS after_credited
+          FROM ord CROSS JOIN rng
+         GROUP BY ord.group_key
+      ), pay_agg AS (
+        SELECT pay.group_key,
+               COUNT(*) FILTER (WHERE pay.created_at::date BETWEEN rng.f AND rng.t)::int AS period_payments,
+               COALESCE(SUM(pay.amount) FILTER (WHERE pay.created_at::date BETWEEN rng.f AND rng.t), 0)::float8 AS period_paid,
+               COALESCE(SUM(pay.amount) FILTER (WHERE pay.created_at::date > rng.t), 0)::float8 AS after_paid
+          FROM pay CROSS JOIN rng
+         GROUP BY pay.group_key
       )` : '';
-  const periodSelect = hasPeriod ? 'COALESCE(MAX(pe.period_orders), 0)::int AS period_orders,' : '';
-  const periodJoin = hasPeriod ? 'LEFT JOIN period pe ON pe.group_key = pb.group_key' : '';
+  const periodSelect = hasPeriod ? `
+        COALESCE(MAX(oa.period_orders), 0)::int          AS period_orders,
+        COALESCE(MAX(oa.period_credited), 0)::float8     AS period_credited,
+        COALESCE(MAX(pa.period_payments), 0)::int        AS period_payments,
+        COALESCE(MAX(pa.period_paid), 0)::float8         AS period_paid,
+        MAX(oa.period_last_order_at)                     AS period_last_order_at,
+        (SUM(pb.balance) - COALESCE(MAX(oa.after_credited), 0) + COALESCE(MAX(pa.after_paid), 0))::float8 AS closing_balance,` : '';
+  const periodJoin = hasPeriod
+    ? 'LEFT JOIN ord_agg oa ON oa.group_key = pb.group_key LEFT JOIN pay_agg pa ON pa.group_key = pb.group_key' : '';
   const periodParams = hasPeriod ? [String(from), String(to)] : [];
 
   try {
@@ -440,6 +491,15 @@ router.get('/customers', requireUser, async (req, res) => {
       GROUP BY pb.group_key
       ORDER BY SUM(pb.balance) DESC, MAX(pb.last_order_at) DESC
     `, [...s.params, ...periodParams]);
+
+    if (hasPeriod) {
+      const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+      for (const r of rows) {
+        r.period_credited = r2(r.period_credited);
+        r.period_paid = r2(r.period_paid);
+        r.closing_balance = r2(r.closing_balance);
+      }
+    }
 
     const totals = {
       customers: rows.length,

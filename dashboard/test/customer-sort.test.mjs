@@ -1,6 +1,39 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { daysSince, daysLabel, localDay, sortCustomers, daysBefore, periodRange } from '../src/customerSort.js';
+import { daysSince, daysLabel, localDay, sortCustomers, daysBefore, periodRange, periodView, periodTotals } from '../src/customerSort.js';
+
+const P = [
+  // ordered and paid in the period
+  { group_key: 'a', name: 'Ali', period_orders: 2, period_payments: 1, period_credited: 600, period_paid: 200, closing_balance: 900, period_last_order_at: '2026-10-07 11:00:00', last_order_at: '2026-10-07 11:00:00', total_credited: 5000, total_paid: 100, balance: 900 },
+  // only paid — no order in the period, so no last order here
+  { group_key: 'b', name: 'Bilal', period_orders: 0, period_payments: 1, period_credited: 0, period_paid: 500, closing_balance: 0, period_last_order_at: null, last_order_at: '2026-09-01 10:00:00', total_credited: 700, total_paid: 700, balance: 0 },
+  // only ordered
+  { group_key: 'c', name: 'Chand', period_orders: 1, period_payments: 0, period_credited: 300, period_paid: 0, closing_balance: 300, period_last_order_at: '2026-10-07 09:30:00', last_order_at: '2026-10-07 09:30:00', total_credited: 300, total_paid: 0, balance: 300 },
+  // did nothing in the period but still has a balance
+  { group_key: 'd', name: 'Danish', period_orders: 0, period_payments: 0, period_credited: 0, period_paid: 0, closing_balance: 1500, period_last_order_at: null, last_order_at: '2026-08-01 10:00:00', total_credited: 1500, total_paid: 0, balance: 1500 },
+];
+
+test('periodView keeps anyone who ordered OR paid, and shows the period figures', () => {
+  const v = periodView(P);
+  assert.deepEqual(v.map((r) => r.group_key), ['a', 'b', 'c']);
+  const a = v.find((r) => r.group_key === 'a');
+  assert.equal(a.total_credited, 600);          // the period's, not the lifetime 5000
+  assert.equal(a.total_paid, 200);              // not the lifetime 100
+  assert.equal(a.balance, 900);                 // closing balance
+  const b = v.find((r) => r.group_key === 'b');
+  assert.equal(b.total_paid, 500);
+  assert.equal(b.last_order_at, null);          // paid only: no order in the period, not the old September one
+});
+
+test('periodTotals sums credited, paid and the closing balance of EVERY customer', () => {
+  assert.deepEqual(periodTotals(P), { active: 3, credited: 900, paid: 700, outstanding: 2700, owing: 3 });
+});
+
+test('period sorts: credited and paid, highest first', () => {
+  const v = periodView(P);
+  assert.equal(sortCustomers(v, 'credited', '2026-10-07').map((r) => r.group_key).join(''), 'acb');
+  assert.equal(sortCustomers(v, 'paid', '2026-10-07').map((r) => r.group_key).join(''), 'bac');
+});
 
 test('daysBefore steps back across month, year and leap-day boundaries', () => {
   assert.equal(daysBefore('2026-10-07', 0), '2026-10-07');

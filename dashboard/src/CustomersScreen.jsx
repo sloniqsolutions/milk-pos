@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import BranchFilter from './BranchFilter';
-import { SORTS, PERIODS, sortCustomers, daysLabel, localDay, periodRange } from './customerSort';
+import { SORTS, PERIOD_SORTS, PERIODS, sortCustomers, daysLabel, localDay, periodRange, periodView, periodTotals } from './customerSort';
 
 /**
  * Credit customers.
@@ -83,11 +83,17 @@ export default function CustomersScreen() {
     return () => { cancelled = true; clearInterval(poll); };
   }, [branchId, rangeFrom, rangeTo]);
 
-  // Only people who really had a credit order in the chosen period. An older cloud that
-  // cannot count them is said so on screen rather than quietly showing everybody.
+  // With a period chosen, the table shows only people who had a credit order or made a payment in
+  // it, with that period's own figures. An older cloud that cannot supply them is said so on
+  // screen rather than quietly showing lifetime numbers under a period's name.
   const periodActive = Boolean(rangeFrom && rangeTo);
-  const periodSupported = !periodActive || rows.length === 0 || rows[0].period_orders !== undefined;
-  const inPeriod = periodActive && periodSupported ? rows.filter(r => (r.period_orders || 0) > 0) : rows;
+  const periodSupported = !periodActive || rows.length === 0 || rows[0].period_credited !== undefined;
+  const periodMode = periodActive && periodSupported;
+  const inPeriod = periodMode ? periodView(rows) : rows;
+  const pTotals = periodMode ? periodTotals(rows) : null;
+
+  const sortOptions = periodMode ? [...SORTS, ...PERIOD_SORTS] : SORTS;
+  const activeSort = sortOptions.some(s => s.key === sortKey) ? sortKey : 'balance';
 
   const term = search.trim().toLowerCase();
   const matching = term
@@ -96,8 +102,37 @@ export default function CustomersScreen() {
         String(r.phone || '').replace(/\D/g, '').includes(term.replace(/\D/g, '')) ||
         String(r.address || '').toLowerCase().includes(term))
     : inPeriod;
-  // Display order only — the rows themselves are exactly what the cloud sent.
-  const visible = sortCustomers(matching, sortKey, localDay());
+  // Display order only — the figures are exactly what the cloud sent.
+  const visible = sortCustomers(matching, activeSort, localDay());
+
+  const when = (v) => (v ? String(v).slice(0, 16) : '—');
+  const td = { padding: '8px 10px' };
+  const columns = periodMode
+    ? [
+        { h: 'Name', cell: c => (<>{c.name || 'Unnamed'}{c.active === 0 && (
+            <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: '#6B7280', background: '#F3F4F6', border: '1px solid #E5E9F0', borderRadius: 999, padding: '1px 6px' }}>inactive</span>)}</>),
+          style: { ...td, fontWeight: 600, color: '#111827' } },
+        { h: 'Phone', cell: c => c.phone || '—', style: { ...td, color: '#374151', whiteSpace: 'nowrap' } },
+        { h: 'Orders', cell: c => c.period_orders, style: { ...td, color: '#374151' } },
+        { h: 'Credited', right: true, cell: c => money(c.total_credited), style: { ...td, textAlign: 'right', color: '#374151' } },
+        { h: 'Paid', right: true, cell: c => money(c.total_paid), style: { ...td, textAlign: 'right', color: '#16A34A' } },
+        { h: 'Balance', right: true, cell: c => money(c.balance), style: { ...td, textAlign: 'right', fontWeight: 700, color: (c.balance || 0) > 0 ? '#B45309' : '#111827' } },
+        { h: 'Last order', cell: c => when(c.last_order_at), style: { ...td, color: '#374151', whiteSpace: 'nowrap' } },
+      ]
+    : [
+        { h: 'Name', cell: c => (<>{c.name || 'Unnamed'}{c.active === 0 && (
+            <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: '#6B7280', background: '#F3F4F6', border: '1px solid #E5E9F0', borderRadius: 999, padding: '1px 6px' }}>inactive</span>)}</>),
+          style: { ...td, fontWeight: 600, color: '#111827' } },
+        { h: 'Phone', cell: c => c.phone || '—', style: { ...td, color: '#374151', whiteSpace: 'nowrap' } },
+        { h: 'Address', cell: c => c.address || '—', style: { ...td, color: '#6B7280', maxWidth: 320 } },
+        { h: 'Litres', right: true, cell: c => `${Number(c.total_litres || 0).toFixed(1)} L`, style: { ...td, textAlign: 'right', color: '#374151' } },
+        { h: 'Credited', right: true, cell: c => money(c.total_credited), style: { ...td, textAlign: 'right', color: '#374151' } },
+        { h: 'Paid', right: true, cell: c => money(c.total_paid), style: { ...td, textAlign: 'right', color: '#16A34A' } },
+        { h: 'Balance', right: true, cell: c => money(c.balance), style: { ...td, textAlign: 'right', fontWeight: 700, color: (c.balance || 0) > 0 ? '#B45309' : '#111827' } },
+        { h: 'Last order', cell: c => String(c.last_order_at || '').slice(0, 10) || '—', style: { ...td, color: '#9CA3AF', whiteSpace: 'nowrap' } },
+        { h: 'Days ago', cell: c => daysLabel(c.days), style: { ...td, color: '#374151', whiteSpace: 'nowrap' } },
+        { h: 'Branches', cell: c => c.branches || '—', style: { ...td, color: '#6B7280' } },
+      ];
 
   return (
     <div style={{ padding: 24, maxWidth: 1200, margin: '0 auto' }}>
@@ -113,7 +148,7 @@ export default function CustomersScreen() {
           }}
         />
         <select
-          value={sortKey}
+          value={activeSort}
           onChange={e => setSortKey(e.target.value)}
           aria-label="Sort customers"
           style={{
@@ -121,7 +156,7 @@ export default function CustomersScreen() {
             fontSize: 14, background: '#FFFFFF', color: '#111827', fontFamily: 'inherit',
           }}
         >
-          {SORTS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+          {sortOptions.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
         </select>
       </div>
 
@@ -155,9 +190,9 @@ export default function CustomersScreen() {
       </div>
       <p style={{ margin: '0 0 20px', fontSize: 12, color: '#6B7280' }}>
         {period === 'all' && 'Showing every credit customer.'}
-        {period !== 'all' && !periodActive && 'Pick both dates to see who ordered in that range.'}
-        {periodActive && !periodSupported && 'This cloud version cannot filter by period yet, so every customer is shown.'}
-        {periodActive && periodSupported && `Showing customers with at least one credit order from ${rangeFrom} to ${rangeTo}.`}
+        {period !== 'all' && !periodActive && 'Pick both dates to see what customers took and paid in that range.'}
+        {periodActive && !periodSupported && 'This cloud version cannot show a period yet, so the lifetime figures are shown.'}
+        {periodMode && `From ${rangeFrom} to ${rangeTo}: customers who took milk on credit or paid something in this period. Credited and Paid are that period's own; Balance is what they owed at the end of ${rangeTo}.`}
       </p>
 
       {error && (
@@ -170,12 +205,21 @@ export default function CustomersScreen() {
       )}
 
       <div style={{ ...card, marginBottom: 20 }}>
-        <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
-          <Stat label="Credit customers" value={totals.customers ?? 0} />
-          <Stat label="Outstanding balance" value={money(totals.outstanding)} tone="#B45309" />
-          <Stat label="Customers owing" value={totals.owing ?? 0} />
-          <Stat label="Lifetime litres" value={`${Number(totals.litres || 0).toFixed(1)} L`} />
-        </div>
+        {periodMode ? (
+          <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+            <Stat label="Customers active" value={pTotals.active} />
+            <Stat label="Credited in period" value={money(pTotals.credited)} />
+            <Stat label="Paid in period" value={money(pTotals.paid)} tone="#16A34A" />
+            <Stat label={`Total balance at end of ${rangeTo}`} value={money(pTotals.outstanding)} tone="#B45309" />
+          </div>
+        ) : (
+          <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+            <Stat label="Credit customers" value={totals.customers ?? 0} />
+            <Stat label="Outstanding balance" value={money(totals.outstanding)} tone="#B45309" />
+            <Stat label="Customers owing" value={totals.owing ?? 0} />
+            <Stat label="Lifetime litres" value={`${Number(totals.litres || 0).toFixed(1)} L`} />
+          </div>
+        )}
         <p style={{ margin: '12px 0 0', fontSize: 12, color: '#9CA3AF' }}>
           Balances are computed at the till and pushed on every credit sale and
           every payment received, so they stay current within a sync.
@@ -192,8 +236,8 @@ export default function CustomersScreen() {
         ) : !visible.length ? (
           <p style={{ color: '#9CA3AF', fontSize: 14, margin: 0 }}>
             {rows.length
-              ? (periodActive && periodSupported && !term
-                  ? 'No customer had a credit order in this period.'
+              ? (periodMode && !term
+                  ? 'No customer took milk on credit or paid anything in this period.'
                   : 'Nobody matches that search.')
               : 'No credit customers yet. They are added at the till, on the Customers screen.'}
           </p>
@@ -202,64 +246,19 @@ export default function CustomersScreen() {
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
               <thead>
                 <tr style={{ borderBottom: '1px solid #E5E9F0' }}>
-                  {['Name', 'Phone', 'Address', 'Litres', 'Credited', 'Paid', 'Balance', 'Last order', 'Days ago', ...(periodActive && periodSupported ? ['Orders in period'] : []), 'Branches']
-                    .map((h, i) => (
-                      <th key={h} style={{
-                        textAlign: i >= 3 && i <= 6 ? 'right' : 'left', padding: '8px 10px',
-                        fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.3, color: '#6B7280',
-                        whiteSpace: 'nowrap',
-                      }}>{h}</th>
-                    ))}
+                  {columns.map(col => (
+                    <th key={col.h} style={{
+                      textAlign: col.right ? 'right' : 'left', padding: '8px 10px',
+                      fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.3, color: '#6B7280',
+                      whiteSpace: 'nowrap',
+                    }}>{col.h}</th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
                 {visible.map(c => (
                   <tr key={c.group_key} style={{ borderBottom: '1px solid #F3F4F6' }}>
-                    <td style={{ padding: '8px 10px', fontWeight: 600, color: '#111827' }}>
-                      {c.name || 'Unnamed'}
-                      {c.active === 0 && (
-                        <span style={{
-                          marginLeft: 6, fontSize: 10, fontWeight: 700, color: '#6B7280',
-                          background: '#F3F4F6', border: '1px solid #E5E9F0',
-                          borderRadius: 999, padding: '1px 6px',
-                        }}>
-                          inactive
-                        </span>
-                      )}
-                    </td>
-                    <td style={{ padding: '8px 10px', color: '#374151', whiteSpace: 'nowrap' }}>
-                      {c.phone || '—'}
-                    </td>
-                    <td style={{ padding: '8px 10px', color: '#6B7280', maxWidth: 320 }}>
-                      {c.address || '—'}
-                    </td>
-                    <td style={{ padding: '8px 10px', textAlign: 'right', color: '#374151' }}>
-                      {Number(c.total_litres || 0).toFixed(1)} L
-                    </td>
-                    <td style={{ padding: '8px 10px', textAlign: 'right', color: '#374151' }}>
-                      {money(c.total_credited)}
-                    </td>
-                    <td style={{ padding: '8px 10px', textAlign: 'right', color: '#16A34A' }}>
-                      {money(c.total_paid)}
-                    </td>
-                    <td style={{
-                      padding: '8px 10px', textAlign: 'right', fontWeight: 700,
-                      color: (c.balance || 0) > 0 ? '#B45309' : '#111827',
-                    }}>
-                      {money(c.balance)}
-                    </td>
-                    <td style={{ padding: '8px 10px', color: '#9CA3AF', whiteSpace: 'nowrap' }}>
-                      {String(c.last_order_at || '').slice(0, 10) || '—'}
-                    </td>
-                    <td style={{ padding: '8px 10px', color: '#374151', whiteSpace: 'nowrap' }}>
-                      {daysLabel(c.days)}
-                    </td>
-                    {periodActive && periodSupported && (
-                      <td style={{ padding: '8px 10px', color: '#374151' }}>{c.period_orders}</td>
-                    )}
-                    <td style={{ padding: '8px 10px', color: '#6B7280' }}>
-                      {c.branches || '—'}
-                    </td>
+                    {columns.map(col => <td key={col.h} style={col.style}>{col.cell(c)}</td>)}
                   </tr>
                 ))}
               </tbody>
