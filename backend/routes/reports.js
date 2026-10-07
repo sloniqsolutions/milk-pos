@@ -107,6 +107,36 @@ router.get('/kpi', (req, res) => {
         AND COALESCE(note, '') NOT LIKE '${RESTORED_NOTE_LIKE}'
     `).get(from, to, ...cScope.params);
 
+    // How many different customers those payments came from — the same rows and
+    // the same filters as the sum above, so the two always describe one set of payments.
+    const creditCustomers = db.prepare(`
+      SELECT COUNT(DISTINCT customer_id) AS n
+      FROM credit_payments
+      WHERE DATE(created_at) BETWEEN DATE(?) AND DATE(?)${cScope.sql}
+        AND COALESCE(note, '') NOT LIKE '${RESTORED_NOTE_LIKE}'
+    `).get(from, to, ...cScope.params);
+
+    // Milk that went to registered customers (an order carrying a customer_id),
+    // whatever way it was paid for. Lines go through the same classifier and the
+    // same split as /detailed, so litres and rupees here are that report's own
+    // milk_qty / milk_value for those orders — not a second calculation.
+    const oScope = userScope(req, 'o');
+    const customerLines = db.prepare(`
+      SELECT oi.order_id AS key, m.category AS category, oi.is_deal AS is_deal,
+             oi.name AS name, oi.quantity AS quantity, oi.price AS price
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        LEFT JOIN menu_items m ON m.id = oi.menu_item_id AND oi.is_deal = 0
+       WHERE DATE(o.created_at) BETWEEN DATE(?) AND DATE(?)
+         AND o.status != 'voided' AND o.customer_id IS NOT NULL${oScope.sql}
+    `).all(from, to, ...oScope.params);
+    let customerMilkLitres = 0;
+    let customerMilkValue = 0;
+    for (const o of splitOrderLines(customerLines).values()) {
+      customerMilkLitres += o.milk_qty;
+      customerMilkValue += o.milk_value;
+    }
+
     // What customers are known to have paid but with no date to put it on: the restore's stand-in for
     // history from before payments were kept one by one. It belongs to no day, so no date filter counts
     // it — this is shown beside the card so a customer's lifetime "paid" is not a mystery next to it.
@@ -158,6 +188,9 @@ router.get('/kpi', (req, res) => {
       revenue_trend: revenueTrend,
       orders_trend: ordersTrend,
       credit_collected: round2(creditCollected.credit_collected),
+      credit_customers: Number(creditCustomers.n) || 0,
+      customer_milk_litres: Math.round(customerMilkLitres * 10000) / 10000,
+      customer_milk_value: round2(customerMilkValue),
       credit_undated: round2(creditUndated),
       ingredient_usage: ingredientUsage,
     });

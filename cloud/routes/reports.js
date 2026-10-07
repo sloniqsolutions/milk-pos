@@ -187,6 +187,39 @@ router.get('/kpi', requireUser, async (req, res) => {
        WHERE created_at::date BETWEEN ?::date AND ?::date${creditScope.sql}
     `, [from, to, ...creditScope.params]);
 
+    // Distinct customers behind those payments — same rows, same filter.
+    const creditCustomers = await db.one(`
+      SELECT COUNT(DISTINCT customer_local_id)::int AS n
+        FROM credit_payments
+       WHERE created_at::date BETWEEN ?::date AND ?::date${creditScope.sql}
+    `, [from, to, ...creditScope.params]);
+
+    /*
+     * Milk that went to registered customers — the till's own rule is
+     * "orders.customer_id IS NOT NULL". The cloud's orders table has no
+     * customer_id (the till never pushes it), so the same set is read off
+     * payment_method = 'Credit': the till only ever records a customer_id on a
+     * credit sale (SaleScreen sends it for Credit alone) and refuses a credit
+     * sale without one, so the two pick out the same orders. Lines then go
+     * through the same classifier and split as /detailed below, so these
+     * litres and rupees are that report's own milk_qty / milk_value.
+     */
+    const customerOrderScope = scopeOrders(req, 'o');
+    const customerLines = await db.q(`
+      SELECT oi.order_id AS key, oi.category, COALESCE(oi.is_deal, 0) AS is_deal,
+             oi.name, oi.quantity::float8 AS quantity, oi.price::float8 AS price
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+       WHERE o.created_at::date BETWEEN ?::date AND ?::date
+         AND o.status != 'voided' AND o.payment_method = 'Credit'${customerOrderScope.sql}
+    `, [from, to, ...customerOrderScope.params]);
+    let customerMilkLitres = 0;
+    let customerMilkValue = 0;
+    for (const o of splitOrderLines(customerLines).values()) {
+      customerMilkLitres += o.milk_qty;
+      customerMilkValue += o.milk_value;
+    }
+
     // How much of each ingredient this date range actually consumed, and
     // what's left right now — same reasoning and same 'sale'-typed
     // inventory_entries rows as backend/routes/reports.js's own copy. The
@@ -234,6 +267,9 @@ router.get('/kpi', requireUser, async (req, res) => {
       revenue_trend: revenueTrend,
       orders_trend: ordersTrend,
       credit_collected: round2(creditCollected.credit_collected),
+      credit_customers: Number(creditCustomers.n) || 0,
+      customer_milk_litres: Math.round(customerMilkLitres * 10000) / 10000,
+      customer_milk_value: round2(customerMilkValue),
       ingredient_usage: ingredientUsage,
     });
   } catch (err) {

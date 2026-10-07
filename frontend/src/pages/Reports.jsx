@@ -30,6 +30,9 @@ const fmtQty = (n) => {
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
 };
 
+/** Litres to at most 2 decimals — "38.96", "6", never "38.958300000001". */
+const fmtLitres = (n) => String(Math.round((Number(n) || 0) * 100) / 100);
+
 const FILTER_CHIPS = [
   { label: 'Today', value: 'today' },
   { label: 'Yesterday', value: 'yesterday' },
@@ -47,7 +50,7 @@ export default function Reports({ onNavigate }) {
   
   const [dateRange, setDateRange] = useState('today');
   const [net, setNet] = useState({ revenue: 0, expenses: 0, net: 0 });
-  const [kpi, setKpi] = useState({ revenue: 0, orders: 0, avg_order_value: 0, total_discounts: 0, credit_collected: 0, ingredient_usage: [] });
+  const [kpi, setKpi] = useState({ revenue: 0, orders: 0, avg_order_value: 0, total_discounts: 0, credit_collected: 0, credit_customers: null, customer_milk_litres: null, customer_milk_value: null, ingredient_usage: [] });
   const [revenueData, setRevenueData] = useState([]);
   const [topItems, setTopItems] = useState([]);
   const [categories, setCategories] = useState([]);
@@ -154,6 +157,10 @@ export default function Reports({ onNavigate }) {
         avg_order_value: kData.avg_order_value || 0,
         total_discounts: kData.total_discounts || 0,
         credit_collected: kData.credit_collected || 0,
+        // null, not 0, when an older backend does not send them: 0 would read as "none".
+        credit_customers: kData.credit_customers == null ? null : Number(kData.credit_customers),
+        customer_milk_litres: kData.customer_milk_litres == null ? null : Number(kData.customer_milk_litres),
+        customer_milk_value: kData.customer_milk_value == null ? null : Number(kData.customer_milk_value),
         credit_undated: kData.credit_undated || 0,
         ingredient_usage: Array.isArray(kData.ingredient_usage) ? kData.ingredient_usage : []
       });
@@ -599,10 +606,19 @@ export default function Reports({ onNavigate }) {
             value={formatMoney(kpi.credit_collected)}
             icon={CreditCard}
             color="#B45309"
-            subtitle={kpi.credit_undated > 0
+            subtitle={`${kpi.credit_undated > 0
               ? `Paid back on old credit. Another ${formatMoney(kpi.credit_undated)} was paid before dates were recorded and is in no filter.`
-              : 'Paid back on old credit'}
+              : 'Paid back on old credit'}${kpi.credit_customers == null ? '' : ` · from ${kpi.credit_customers} customer${kpi.credit_customers === 1 ? '' : 's'}`}`}
           />
+          {kpi.customer_milk_litres != null && (
+            <KpiCard
+              title="Milk Sold to Customers"
+              value={`${fmtLitres(kpi.customer_milk_litres)} L`}
+              icon={Droplet}
+              color="#0EA5E9"
+              subtitle={`${fmtLitres(kpi.customer_milk_litres)} Litre · ${formatMoney(kpi.customer_milk_value)}`}
+            />
+          )}
           <KpiCard
             title="Net (After Expenses)"
             value={formatMoney(net.net)}
