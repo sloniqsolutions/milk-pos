@@ -1,5 +1,10 @@
 {
-  "build": "npm install --prefix dashboard && npm install --prefix frontend --omit=dev && npm run build --prefix dashboard && npm install --prefix cloud --omit=dev",
+  "installCommand": "npm install && npm install --prefix ../cloud --omit=dev",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "rewrites": [
+    { "source": "/((?!api/).*)", "destination": "/index.html" }
+  ],
   "functions": {
     "api/[...path].js": {
       "includeFiles": "../cloud/**"

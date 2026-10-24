@@ -47,9 +47,35 @@ function cloudApiForPosScreens() {
   };
 }
 
+/**
+ * Resolve npm packages imported by the POS screens from the dashboard's own
+ * node_modules.
+ *
+ * The POS keeps its UI libraries (lucide-react, recharts, ...) in
+ * devDependencies, so a production install of ../frontend leaves them out and
+ * the build fails with "failed to resolve import". The dashboard already lists
+ * every one it needs, so a single install here is enough and ../frontend never
+ * has to be installed.
+ */
+function packagesFromDashboard() {
+  const inPosSource = (file) => {
+    const f = String(file || '').replace(/\\/g, '/');
+    return f.startsWith(POS_SRC.replace(/\\/g, '/'));
+  };
+  return {
+    name: 'packages-from-dashboard',
+    enforce: 'pre',
+    async resolveId(source, importer, options) {
+      if (!inPosSource(importer)) return null;
+      if (source.startsWith('.') || source.startsWith('/') || source.startsWith('@/') || source.startsWith('\0')) return null;
+      return this.resolve(source, path.join(__dirname, 'src/main.jsx'), { ...options, skipSelf: true });
+    },
+  };
+}
+
 export default defineConfig({
   base: '/',
-  plugins: [cloudApiForPosScreens(), react()],
+  plugins: [cloudApiForPosScreens(), packagesFromDashboard(), react()],
   build: { outDir: 'dist', emptyOutDir: true },
   resolve: {
     // Order matters: the specific overrides must be tried before the general
