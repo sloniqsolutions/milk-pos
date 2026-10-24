@@ -292,6 +292,20 @@ async function recomputeStock(client, branchId, ingredientLocalIds) {
 }
 
 /**
+ * Every ingredient, ordered so that when two rows share a name the one holding
+ * the stock history comes LAST — the name maps built from this keep the last
+ * row they see. Unordered, Postgres returned the rows in whatever order it
+ * liked, so with a duplicate "Yogurt" row each request could pick a different
+ * one and split the yogurt history across both.
+ */
+const INGREDIENTS_BY_NAME = `
+  SELECT i.local_id, i.name FROM ingredients i
+   WHERE i.branch_id = $1
+   ORDER BY (SELECT COUNT(*) FROM inventory_entries e
+              WHERE e.branch_id = i.branch_id AND e.ingredient_local_id = i.local_id) ASC,
+            i.local_id ASC`;
+
+/**
  * Ingredients get their own handler rather than simpleIngest, because
  * `(branch_id, local_id)` alone isn't a safe key for this one table: a
  * branch can have more than one till (this shop does), and each till's
@@ -316,7 +330,7 @@ async function recomputeStock(client, branchId, ingredientLocalIds) {
  */
 async function ingestIngredients(client, branchId, rows, receivedAt /* , deviceId — unused: merged by name instead, see above */) {
   const existing = await client.query(
-    'SELECT local_id, name FROM ingredients WHERE branch_id = $1', [branchId]);
+    INGREDIENTS_BY_NAME, [branchId]);
   const canonicalIdByName = new Map(existing.rows.map(r => [r.name, Number(r.local_id)]));
 
   const remapped = new Map(); // canonical local_id -> row (last one in the batch wins)
@@ -349,7 +363,7 @@ async function ingestIngredients(client, branchId, rows, receivedAt /* , deviceI
  */
 async function ingestInventoryEntries(client, branchId, rows, receivedAt, deviceId) {
   const existing = await client.query(
-    'SELECT local_id, name FROM ingredients WHERE branch_id = $1', [branchId]);
+    INGREDIENTS_BY_NAME, [branchId]);
   const idByName = new Map(existing.rows.map(r => [String(r.name), Number(r.local_id)]));
   const affectedIngredients = [];
   const resolved = rows.map((r) => {
