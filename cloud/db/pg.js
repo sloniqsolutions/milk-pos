@@ -32,7 +32,27 @@ const { Pool } = require('pg');
 // own in a fresh terminal. An already-exported value still wins; see env.js.
 require('../env').loadEnv();
 
-const connectionString = process.env.DATABASE_URL;
+/*
+ * Serverless (Vercel) uses Supabase's TRANSACTION pooler, port 6543.
+ *
+ * The session pooler on 5432 allows 15 clients in total, shared with the
+ * persistent server. Every Vercel instance opens its own pool, and the
+ * dashboard fires ten report requests at once, so on Vercel that ceiling was
+ * hit within seconds: the session lookup failed and a signed-in owner got
+ * "Sign in required" (401) or "Database unavailable" (503) at random.
+ * The transaction pooler has no such per-client ceiling.
+ *
+ * Nothing here depends on session state any more on that port: the two
+ * settings below are already the role's defaults (see applyRoleSettings in
+ * schema.js), and the schema lock is transaction-scoped. A persistent server
+ * keeps the session pooler exactly as before.
+ */
+const SERVERLESS = Boolean(process.env.VERCEL);
+const rawUrl = process.env.DATABASE_URL;
+const connectionString = SERVERLESS && rawUrl && /\.pooler\.supabase\.com:5432\//.test(rawUrl)
+  ? rawUrl.replace(/\.pooler\.supabase\.com:5432\//, '.pooler.supabase.com:6543/')
+  : rawUrl;
+const TRANSACTION_POOLER = /:6543\//.test(connectionString || '');
 
 if (!connectionString) {
   console.error(
@@ -55,8 +75,10 @@ const pool = new Pool({
   ssl: isLocal ? false : { rejectUnauthorized: false },
   // Small: this process is the only writer, and Supabase's free tier has a
   // modest connection ceiling that a generous pool would exhaust on its own.
-  max: Number(process.env.PGPOOL_MAX) || 8,
-  idleTimeoutMillis: 30_000,
+  // One serverless instance serves few requests at a time; a small pool that
+  // lets go of idle connections quickly keeps many instances from piling up.
+  max: Number(process.env.PGPOOL_MAX) || (SERVERLESS ? 3 : 8),
+  idleTimeoutMillis: SERVERLESS ? 5_000 : 30_000,
   connectionTimeoutMillis: 10_000,
 });
 
@@ -103,7 +125,10 @@ const configured = new WeakSet();
 async function withClient(fn) {
   const client = await pool.connect();
   try {
-    if (!configured.has(client)) {
+    // Through the transaction pooler a SET would land on whichever server
+    // connection runs it and not stay with this client, so it is skipped; the
+    // role defaults already carry both values there.
+    if (!TRANSACTION_POOLER && !configured.has(client)) {
       await client.query('SET extra_float_digits = 3');
       await client.query("SET idle_in_transaction_session_timeout = '30s'");
       configured.add(client);
@@ -226,4 +251,4 @@ async function close() {
   await pool.end();
 }
 
-module.exports = { pool, q, one, run, tx, close, toPg };
+module.exports = { pool, q, one, run, tx, close, toPg, TRANSACTION_POOLER };

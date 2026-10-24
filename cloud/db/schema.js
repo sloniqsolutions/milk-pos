@@ -933,19 +933,24 @@ async function createSchema(db) {
   // gets there first runs the DDL while the rest simply wait a moment, then
   // find the tables already exist and move on quickly.
   //
-  // Must run on one held client, not `db.pool.query()` — an advisory lock is
-  // tied to the session that took it, and the pool can hand different
-  // queries to different underlying connections.
+  // The lock is transaction-scoped: taken and released by the one transaction
+  // the DDL runs in. A session-scoped lock/unlock pair would, through the
+  // transaction pooler (serverless), run on two different server connections
+  // and leave the lock held forever. (A multi-statement DDL string already ran
+  // as one implicit transaction, so wrapping it changes nothing else.)
   //
   // 727215 is an arbitrary fixed key. It only needs to be unique to this one
   // lock in this codebase — nothing else ever takes it.
   const client = await db.pool.connect();
   try {
-    await client.query('SELECT pg_advisory_lock(727215)');
+    await client.query('BEGIN');
     try {
+      await client.query('SELECT pg_advisory_xact_lock(727215)');
       await client.query(DDL);
-    } finally {
-      await client.query('SELECT pg_advisory_unlock(727215)');
+      await client.query('COMMIT');
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch (e) { /* connection is gone */ }
+      throw err;
     }
   } finally {
     client.release();

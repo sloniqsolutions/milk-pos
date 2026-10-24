@@ -62,43 +62,60 @@ async function attachUser(req, res, next) {
   const token = req.cookies && req.cookies[COOKIE];
   if (!token) return next();
 
-  try {
-    const row = await db.one(`
+  const lookup = () => db.one(`
       SELECT s.token, s.expires_at, u.id, u.email, u.name, u.role, u.branch_id, u.active
         FROM sessions s
         JOIN users u ON u.id = s.user_id
        WHERE s.token = $1
     `, [token]);
 
-    if (!row || !row.active) return next();
-
-    const now = Date.now();
-    // expires_at is a bigint, which pg hands back as a string.
-    const expiresAt = Number(row.expires_at);
-
-    if (expiresAt < now) {
-      await db.run('DELETE FROM sessions WHERE token = $1', [token]);
-      return next();
-    }
-
-    // Sliding expiry, written at most once an hour.
-    if (expiresAt - now < TTL_MS - REFRESH_AFTER_MS) {
-      await db.run('UPDATE sessions SET expires_at = $1 WHERE token = $2', [now + TTL_MS, token]);
-    }
-
-    req.user = {
-      id: row.id,
-      email: row.email,
-      name: row.name,
-      role: row.role,
-      // NULL means every branch. Set on a future per-branch account to scope it
-      // without touching this code again.
-      branchId: row.branch_id,
-    };
+  let row;
+  try {
+    row = await lookup();
   } catch (err) {
-    // A database blip must not sign everybody out mid-request; treat it as
-    // "not signed in for this request" and let the route return 401.
-    console.error('Session lookup failed:', err.message);
+    // One retry for a brief blip. If the database is still unreachable, say so
+    // (503) rather than answering "Sign in required" to someone who IS signed
+    // in — that looked like the session itself was broken.
+    console.error('Session lookup failed, retrying:', err.message);
+    await new Promise((r) => setTimeout(r, 250));
+    try {
+      row = await lookup();
+    } catch (err2) {
+      console.error('Session lookup failed:', err2.message);
+      return res.status(503).json({ error: 'Database busy, please try again.', code: 'DB_UNAVAILABLE' });
+    }
+  }
+
+  if (!row || !row.active) return next();
+
+  const now = Date.now();
+  // expires_at is a bigint, which pg hands back as a string.
+  const expiresAt = Number(row.expires_at);
+
+  if (expiresAt < now) {
+    db.run('DELETE FROM sessions WHERE token = $1', [token])
+      .catch((err) => console.error('Expired session cleanup failed:', err.message));
+    return next();
+  }
+
+  req.user = {
+    id: row.id,
+    email: row.email,
+    name: row.name,
+    role: row.role,
+    // NULL means every branch. Set on a future per-branch account to scope it
+    // without touching this code again.
+    branchId: row.branch_id,
+  };
+
+  // Sliding expiry, written at most once an hour. Best effort: a failed refresh
+  // must not turn a valid session into a "Sign in required".
+  if (expiresAt - now < TTL_MS - REFRESH_AFTER_MS) {
+    try {
+      await db.run('UPDATE sessions SET expires_at = $1 WHERE token = $2', [now + TTL_MS, token]);
+    } catch (err) {
+      console.error('Session refresh failed:', err.message);
+    }
   }
 
   next();
