@@ -62,11 +62,27 @@ async function seedDahiSizes() {
   }
 }
 
+/**
+ * Serverless only: is the schema already in place? Every Vercel cold start used
+ * to run the whole DDL (dozens of ALTER TABLEs that each take a table lock, plus
+ * a self-heal UPDATE) against the live database, and several cold starts at once
+ * — the dashboard's Reports page fires ten requests together — queued behind each
+ * other until some answered "Database unavailable". The persistent server still
+ * applies the full schema at boot; a cold start only needs to confirm it is there.
+ * `product_keys` is the last table the DDL creates.
+ */
+async function schemaAlreadyApplied() {
+  if (!process.env.VERCEL) return false;
+  const row = await db.one("SELECT to_regclass('public.product_keys') IS NOT NULL AS ok");
+  return Boolean(row && row.ok);
+}
+
 function ensureSchema() {
   if (!ready) {
-    ready = createSchema(db)
-      .then(() => seedDahiMenuItem())
-      .then(() => seedDahiSizes())
+    ready = schemaAlreadyApplied()
+      .then((applied) => (applied ? null : createSchema(db)
+        .then(() => seedDahiMenuItem())
+        .then(() => seedDahiSizes())))
       .catch((err) => {
         // Let the next attempt try again rather than wedging this process into
         // permanently rejecting on a transient connection failure.

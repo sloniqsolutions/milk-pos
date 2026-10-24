@@ -30,13 +30,28 @@ export class ApiError extends Error {
   }
 }
 
+// A read that meets a momentarily busy server (a cold start, the database
+// briefly saturated) is retried a couple of times instead of failing the whole
+// screen. Only reads, and only "busy" answers: a write is never re-sent, and a
+// 401 or 404 is a real answer, not a blip.
+const RETRY_STATUSES = new Set([502, 503, 504]);
+const RETRY_DELAYS_MS = [400, 1200];
+
 async function request(method, path, body) {
-  const res = await fetch(BASE + path, {
+  const send = () => fetch(BASE + path, {
     method,
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
     body: body ? JSON.stringify(body) : undefined,
   });
+  let res = await send();
+  if (method === 'GET') {
+    for (const delay of RETRY_DELAYS_MS) {
+      if (!RETRY_STATUSES.has(res.status)) break;
+      await new Promise((r) => setTimeout(r, delay));
+      res = await send();
+    }
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError(data.error || 'Request failed', res.status);
   return data;
