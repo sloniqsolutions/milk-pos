@@ -527,6 +527,9 @@ router.get('/detailed', requireUser, async (req, res) => {
   const { from, to } = getDateRange(req);
   const includeVoided = req.query.include_voided === '1' || req.query.include_voided === 'true';
   const scope = scopeOrders(req, 'o');
+  const pmFilter = req.query.payment_method || '';
+  const pmClause = pmFilter ? ` AND o.payment_method = ?` : '';
+  const pmParams = pmFilter ? [pmFilter] : [];
 
   try {
     const orders = await db.q(`
@@ -576,13 +579,13 @@ router.get('/detailed', requireUser, async (req, res) => {
       LEFT JOIN order_items oi ON oi.order_id = o.id
       LEFT JOIN branches br ON br.id = o.branch_id
       WHERE o.created_at::date BETWEEN ?::date AND ?::date
-        ${includeVoided ? '' : "AND o.status != 'voided'"}${scope.sql}
+        ${includeVoided ? '' : "AND o.status != 'voided'"}${scope.sql}${pmClause}
       -- Postgres, unlike SQLite, requires every selected column to be grouped
       -- or aggregated. Grouping by orders' primary key covers o.*, but br.name
       -- comes from a joined table and has to be named explicitly.
       GROUP BY o.id, br.name, br.code
       ORDER BY o.created_at ASC
-    `, [from, to, ...scope.params]);
+    `, [from, to, ...scope.params, ...pmParams]);
 
     /*
      * Every order's lines split into Milk / Dahi / Other by the ONE classifier
@@ -598,8 +601,8 @@ router.get('/detailed', requireUser, async (req, res) => {
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
        WHERE o.created_at::date BETWEEN ?::date AND ?::date
-         ${includeVoided ? '' : "AND o.status != 'voided'"}${scope.sql}
-    `, [from, to, ...scope.params]);
+         ${includeVoided ? '' : "AND o.status != 'voided'"}${scope.sql}${pmClause}
+    `, [from, to, ...scope.params, ...pmParams]);
     const split = splitOrderLines(lines);
     const none = {
       milk_value: 0, milk_lines: 0, milk_items: null, milk_qty: 0,

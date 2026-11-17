@@ -24,6 +24,10 @@ const router = express.Router();
 const db = require('../db/pg');
 const { requireUser } = require('../middleware/session');
 const { localToday } = require('../db/local-date');
+const { unitAmount } = require('../db/item-quantities');
+const { createClassifier } = require('../db/line-classifier');
+
+const { splitOrderLines } = createClassifier(unitAmount);
 
 /** Narrow to one branch when asked, or to a per-branch account's own site. */
 function scope(req, alias) {
@@ -512,6 +516,115 @@ router.get('/customers', requireUser, async (req, res) => {
     };
 
     res.json({ customers: rows, totals });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/customers/detail?key=<group_key> — one person's full credit record,
+ * the dashboard's copy of the till's customer screen (backend/routes/customers.js
+ * GET /:id): every credit order and payment, litres and Dahi to date, a monthly
+ * breakdown and the age of the oldest unpaid bill. Read-only.
+ *
+ * `key` is the group_key from GET /customers above. The person's rows, orders and
+ * payments are matched by exactly the rules that list's period figures use: an
+ * order by phone digits (7+) or else name, in the same branch; a payment through
+ * the customer row it was recorded against.
+ */
+router.get('/customers/detail', requireUser, async (req, res) => {
+  const key = String(req.query.key || '');
+  if (!/^(tel:\d{7,}|name:\d+:.*)$/.test(key)) return res.status(400).json({ error: 'Unknown customer.' });
+  const s = scope(req, 'c');
+  try {
+    const keyed = `
+      SELECT c.*,
+             CASE WHEN LENGTH(REGEXP_REPLACE(COALESCE(c.phone, ''), '[^0-9]', '', 'g')) >= 7
+                  THEN 'tel:' || REGEXP_REPLACE(c.phone, '[^0-9]', '', 'g')
+                  ELSE 'name:' || c.branch_id || ':' || LOWER(BTRIM(COALESCE(c.name, '')))
+             END AS group_key
+        FROM customers c
+       WHERE 1 = 1${s.sql}`;
+    const rows = (await db.q(`SELECT * FROM (${keyed}) k WHERE k.group_key = ?`, [...s.params, key]));
+    if (!rows.length) return res.status(404).json({ error: 'Customer not found.' });
+
+    const pick = (f) => rows.map((r) => r[f]).find((v) => v != null && v !== '') ?? null;
+    const people = [...new Map(rows.map((r) => [`${r.branch_id}`, r])).values()].map((r) => ({
+      branch: r.branch_id,
+      lname: String(r.name || '').trim().toLowerCase(),
+      digits: String(r.phone || '').replace(/\D/g, ''),
+    }));
+
+    // Credit orders, every status (the till lists voided ones too; only completed ones count).
+    const orders = [];
+    for (const p of people) {
+      const byPhone = p.digits.length >= 7;
+      orders.push(...await db.q(`
+        SELECT o.id AS row_id, o.local_id AS id, o.total::float8 AS total, o.created_at, o.status,
+               o.cashier_id, o.cashier_name, b.name AS branch_name
+          FROM orders o LEFT JOIN branches b ON b.id = o.branch_id
+         WHERE o.branch_id = ? AND o.payment_method = 'Credit'
+           AND ((? AND REGEXP_REPLACE(COALESCE(o.customer_phone, ''), '[^0-9]', '', 'g') = ?)
+                OR (? <> '' AND LOWER(BTRIM(COALESCE(o.customer_name, ''))) = ?))`,
+        [p.branch, byPhone, p.digits, p.lname, p.lname]));
+    }
+    const uniqueOrders = [...new Map(orders.map((o) => [o.row_id, o])).values()];
+
+    // Payments recorded against any of this person's customer rows (same matching as the list).
+    const payments = await db.q(`
+      WITH k AS (${keyed})
+      SELECT DISTINCT p.id AS row_id, p.local_id AS id, p.amount::float8 AS amount, p.note, p.received_by, p.created_at
+        FROM k JOIN credit_payments p
+          ON p.branch_id = k.branch_id AND p.customer_local_id = k.local_id
+         AND (COALESCE(p.device_id, 'legacy') = COALESCE(k.device_id, 'legacy')
+              OR (NOT EXISTS (SELECT 1 FROM k x WHERE x.branch_id = p.branch_id AND x.local_id = p.customer_local_id
+                                AND COALESCE(x.device_id, 'legacy') = COALESCE(p.device_id, 'legacy'))
+                  AND (SELECT COUNT(DISTINCT x.group_key) FROM k x WHERE x.branch_id = p.branch_id AND x.local_id = p.customer_local_id) = 1))
+       WHERE k.group_key = ?`, [...s.params, key]);
+
+    // Litres and Dahi per order, by the one classifier every report uses.
+    const completed = uniqueOrders.filter((o) => o.status === 'completed');
+    const perOrder = new Map();
+    if (completed.length) {
+      const lines = await db.q(`
+        SELECT oi.order_id AS key, oi.category, COALESCE(oi.is_deal, 0) AS is_deal, oi.name,
+               oi.quantity::float8 AS quantity, oi.price::float8 AS price
+          FROM order_items oi WHERE oi.order_id = ANY(?)`, [completed.map((o) => o.row_id)]);
+      for (const [id, v] of splitOrderLines(lines)) perOrder.set(id, v);
+    }
+    const round = (n, d) => Math.round((Number(n) || 0) * 10 ** d) / 10 ** d;
+    let totalLitres = 0, totalDahiKg = 0;
+    const monthly = {};
+    for (const o of completed) {
+      const v = perOrder.get(o.row_id) || { milk_qty: 0, dahi_qty: 0 };
+      totalLitres += v.milk_qty; totalDahiKg += v.dahi_qty;
+      const m = String(o.created_at).slice(0, 7);
+      monthly[m] = monthly[m] || { litres: 0, dahi_kg: 0, amount: 0 };
+      monthly[m].litres += v.milk_qty; monthly[m].dahi_kg += v.dahi_qty; monthly[m].amount += o.total;
+    }
+    const totalCredited = completed.reduce((n, o) => n + o.total, 0);
+    const totalPaid = payments.reduce((n, p) => n + p.amount, 0);
+    const balance = totalCredited - totalPaid;
+    const oldest = completed.slice().sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))[0];
+    const daysOutstanding = oldest && balance > 0
+      ? Math.floor((Date.now() - new Date(String(oldest.created_at).replace(' ', 'T')).getTime()) / 86400000) : 0;
+
+    const byNewest = (a, b) => String(b.created_at).localeCompare(String(a.created_at));
+    res.json({
+      group_key: key,
+      name: pick('name'), phone: pick('phone'), address: pick('address'), notes: pick('notes'),
+      active: rows.some((r) => Number(r.active) === 1) ? 1 : 0,
+      balance: round(balance, 2),
+      total_credited: round(totalCredited, 2),
+      total_paid: round(totalPaid, 2),
+      total_litres: round(totalLitres, 4),
+      total_dahi_kg: round(totalDahiKg, 4),
+      days_outstanding: daysOutstanding,
+      orders: uniqueOrders.sort(byNewest).map(({ row_id, ...o }) => o),
+      payments: payments.sort(byNewest).map(({ row_id, ...p }) => p),
+      monthly_breakdown: Object.keys(monthly).sort((a, b) => b.localeCompare(a))
+        .map((month) => ({ month, litres: round(monthly[month].litres, 4), dahi_kg: round(monthly[month].dahi_kg, 4), amount: round(monthly[month].amount, 2) })),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

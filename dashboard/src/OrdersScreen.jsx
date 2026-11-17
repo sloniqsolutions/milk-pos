@@ -1,19 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import BranchFilter from './BranchFilter';
 
-/**
- * Every order, as the branches have delivered them.
- *
- * The till's own Orders screen is not reused here: it is built for finding a
- * sale that happened minutes ago in order to void or reprint it, neither of
- * which the owner can do from the dashboard. What is wanted here is the
- * opposite — a long list, across both branches, that can be searched and
- * narrowed by day.
- *
- * Only as current as the last sync. The completeness banner says so rather than
- * leaving a short list to be read as a quiet day.
- */
-
 const money = (v) =>
   v == null ? '—' : 'Rs ' + Number(v).toLocaleString('en-PK', { maximumFractionDigits: 0 });
 
@@ -23,11 +10,17 @@ const iso = (d) =>
 const RANGES = [
   { key: 'today', label: 'Today', days: 0 },
   { key: 'yesterday', label: 'Yesterday', days: 1, single: true },
-  { key: 'last7', label: 'Last 7 days', days: 6 },
-  { key: 'last30', label: 'Last 30 days', days: 29 },
+  { key: '3days', label: '3 Days', days: 2 },
+  { key: 'last7', label: 'Week', days: 6 },
+  { key: 'last30', label: 'Month', days: 29 },
+  { key: 'custom', label: 'Custom' },
 ];
 
-function rangeDates(key) {
+function rangeDates(key, customFrom, customTo) {
+  if (key === 'custom') {
+    if (customFrom && customTo) return { from: customFrom, to: customTo };
+    return null;
+  }
   const now = new Date();
   const back = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return d; };
   const r = RANGES.find(x => x.key === key) || RANGES[0];
@@ -35,13 +28,20 @@ function rangeDates(key) {
   return { from: iso(back(r.days)), to: iso(now) };
 }
 
+const PAYMENT_METHODS = [
+  { key: '', label: 'All Payments' },
+  { key: 'Cash', label: 'Cash' },
+  { key: 'Credit', label: 'Credit' },
+  { key: 'Online', label: 'Online' },
+];
+
 const card = {
   background: '#FFFFFF', border: '1px solid #E5E9F0', borderRadius: 14, padding: 20,
 };
 
 const chip = (active) => ({
   padding: '6px 14px', borderRadius: 999, fontSize: 13, fontWeight: 600,
-  cursor: 'pointer', whiteSpace: 'nowrap',
+  cursor: 'pointer', whiteSpace: 'nowrap', fontFamily: 'inherit',
   background: active ? '#1B4C82' : '#FFFFFF',
   color: active ? '#FFFFFF' : '#374151',
   border: `1px solid ${active ? '#1B4C82' : '#D1D5DB'}`,
@@ -50,22 +50,26 @@ const chip = (active) => ({
 export default function OrdersScreen() {
   const [branchId, setBranchId] = useState('');
   const [rangeKey, setRangeKey] = useState('today');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+  const [paymentMethod, setPaymentMethod] = useState('');
   const [orders, setOrders] = useState([]);
   const [completeness, setCompleteness] = useState([]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  const dates = rangeDates(rangeKey, customFrom, customTo);
+
   useEffect(() => {
+    if (!dates) return;
     let cancelled = false;
 
     const load = (silent) => {
       if (!silent) setLoading(true);
-      const { from, to } = rangeDates(rangeKey);
-      const qs = new URLSearchParams(branchId ? { from, to, branch: branchId } : { from, to });
-
-      // Voided orders included deliberately: an owner looking through orders
-      // wants to see the one that was cancelled, not have it quietly omitted.
+      const qs = new URLSearchParams({ from: dates.from, to: dates.to });
+      if (branchId) qs.set('branch', branchId);
+      if (paymentMethod) qs.set('payment_method', paymentMethod);
       qs.set('include_voided', '1');
 
       fetch(`/api/reports/detailed?${qs}`, { credentials: 'include' })
@@ -84,12 +88,9 @@ export default function OrdersScreen() {
     };
 
     load(false);
-    // Silent background refresh — keeps the list current without owner having
-    // to reload the page, without re-showing the loading spinner every time.
     const poll = setInterval(() => load(true), 15000);
-
     return () => { cancelled = true; clearInterval(poll); };
-  }, [branchId, rangeKey]);
+  }, [branchId, rangeKey, customFrom, customTo, paymentMethod]);
 
   useEffect(() => {
     const load = () =>
@@ -124,11 +125,33 @@ export default function OrdersScreen() {
 
   return (
     <div style={{ padding: 24, maxWidth: 1280, margin: '0 auto' }}>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 20, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
         <BranchFilter value={branchId} onChange={setBranchId} />
         {RANGES.map(r => (
           <button key={r.key} onClick={() => setRangeKey(r.key)} style={chip(rangeKey === r.key)}>
             {r.label}
+          </button>
+        ))}
+      </div>
+
+      {rangeKey === 'custom' && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
+          <input type="date" value={customFrom} max={customTo || undefined}
+            onChange={e => setCustomFrom(e.target.value)} aria-label="From date"
+            style={{ height: 34, borderRadius: 8, border: '1px solid #D1D5DB', padding: '0 10px', fontSize: 13, fontFamily: 'inherit' }} />
+          <span style={{ color: '#9CA3AF', fontSize: 13 }}>to</span>
+          <input type="date" value={customTo} min={customFrom || undefined}
+            onChange={e => setCustomTo(e.target.value)} aria-label="To date"
+            style={{ height: 34, borderRadius: 8, border: '1px solid #D1D5DB', padding: '0 10px', fontSize: 13, fontFamily: 'inherit' }} />
+          {!dates && <span style={{ fontSize: 12, color: '#9CA3AF' }}>Pick both dates to load orders.</span>}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 20, flexWrap: 'wrap' }}>
+        {PAYMENT_METHODS.map(pm => (
+          <button key={pm.key} onClick={() => setPaymentMethod(pm.key)}
+            style={chip(paymentMethod === pm.key)}>
+            {pm.label}
           </button>
         ))}
         <input
@@ -168,12 +191,14 @@ export default function OrdersScreen() {
             Orders <span style={{ color: '#9CA3AF', fontWeight: 500 }}>({visible.length})</span>
           </h3>
           <span style={{ fontSize: 13, color: '#6B7280' }}>
-            {money(takings)} taken, voided orders excluded
+            {money(takings)} taken{paymentMethod ? ` (${paymentMethod} only)` : ''}, voided orders excluded
           </span>
         </div>
 
         {loading ? (
           <p style={{ color: '#9CA3AF', fontSize: 14, margin: 0 }}>Loading…</p>
+        ) : !dates ? (
+          <p style={{ color: '#9CA3AF', fontSize: 14, margin: 0 }}>Select both dates to view orders.</p>
         ) : !visible.length ? (
           <p style={{ color: '#9CA3AF', fontSize: 14, margin: 0 }}>
             {orders.length ? 'Nothing matches that search.' : 'No orders in this period.'}
@@ -199,8 +224,6 @@ export default function OrdersScreen() {
                   return (
                     <tr key={`${o.branch_name}-${o.id}-${i}`} style={{
                       borderBottom: '1px solid #F3F4F6',
-                      // Struck through rather than hidden: the owner is looking
-                      // for the cancelled one as often as the others.
                       opacity: voided ? 0.55 : 1,
                     }}>
                       <td style={{ padding: '8px 10px', fontWeight: 600, whiteSpace: 'nowrap' }}>

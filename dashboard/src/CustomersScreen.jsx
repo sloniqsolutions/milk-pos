@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import BranchFilter from './BranchFilter';
+import CustomerDetail from './CustomerDetail';
 import { SORTS, PERIOD_SORTS, PERIODS, sortCustomers, daysLabel, localDay, periodRange, periodView, periodTotals } from './customerSort';
 
 /**
@@ -43,6 +44,7 @@ export default function CustomersScreen() {
   const [customTo, setCustomTo] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [selected, setSelected] = useState(null);
 
   // The period is asked of the cloud, which counts each customer's real credit orders in it.
   // "All", or a custom range not yet complete, asks for nothing extra.
@@ -133,6 +135,10 @@ export default function CustomersScreen() {
         { h: 'Days ago', cell: c => daysLabel(c.days), style: { ...td, color: '#374151', whiteSpace: 'nowrap' } },
         { h: 'Branches', cell: c => c.branches || '—', style: { ...td, color: '#6B7280' } },
       ];
+
+  if (selected) {
+    return <CustomerDetail customer={selected} branchId={branchId} onBack={() => setSelected(null)} />;
+  }
 
   return (
     <div style={{ padding: 24, maxWidth: 1200, margin: '0 auto' }}>
@@ -257,7 +263,14 @@ export default function CustomersScreen() {
               </thead>
               <tbody>
                 {visible.map(c => (
-                  <tr key={c.group_key} style={{ borderBottom: '1px solid #F3F4F6' }}>
+                  <tr
+                    key={c.group_key}
+                    onClick={() => setSelected(c)}
+                    title="Open this customer's full record"
+                    style={{ borderBottom: '1px solid #F3F4F6', cursor: 'pointer' }}
+                    onMouseEnter={e => { e.currentTarget.style.background = '#F7F9FC'; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = ''; }}
+                  >
                     {columns.map(col => <td key={col.h} style={col.style}>{col.cell(c)}</td>)}
                   </tr>
                 ))}
