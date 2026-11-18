@@ -161,6 +161,9 @@ export default function ShiftsScreen() {
             <Row label="Revenue so far" value={formatMoney(currentShift?.total_revenue || 0)} />
             <Row muted label="Cash" value={formatMoney(cashRevenue)} />
             <Row muted label="Card / Online" value={formatMoney(currentShift?.non_cash_revenue || 0)} />
+            {Number(currentShift?.credit_sold || 0) > 0 && (
+              <Row muted label="Credit sold" value={formatMoney(currentShift.credit_sold)} />
+            )}
             {Number(currentShift?.credit_collected || 0) > 0 && (
               <Row muted label="Credit collected" value={`+ ${formatMoney(currentShift.credit_collected)}`} />
             )}
@@ -209,8 +212,11 @@ export default function ShiftsScreen() {
                   {' · '}{fmtTime(opened)}–{fmtTime(closed)}
                   {' · '}{sh.total_orders} orders
                   {' · '}{formatMoney(sh.total_revenue || 0)}
+                  {Number(sh.credit_sold || 0) > 0 && (
+                    <span style={{ color: '#B45309' }}>{' · '}{formatMoney(sh.credit_sold)} on credit</span>
+                  )}
                   {Number(sh.credit_collected || 0) > 0 && (
-                    <span style={{ color: '#B45309' }}>{' · +'}{formatMoney(sh.credit_collected)} credit</span>
+                    <span style={{ color: '#16A34A' }}>{' · +'}{formatMoney(sh.credit_collected)} collected</span>
                   )}
                   {' · '}{sh.staff_name || '—'}
                 </div>

@@ -162,6 +162,22 @@ const ORDER_VALUES = (r) => [
 ];
 
 async function ingestOrders(client, branchId, rows, receivedAt, deviceId) {
+  // Reclassify: an order marked "Online" that carries a registered customer
+  // name is almost certainly a Credit sale where the cashier picked the wrong
+  // button. The till sets payment_method = 'Credit' automatically when a
+  // customer is selected, so this only fires for manual overrides or import
+  // mistakes. Safe to do unconditionally — a genuine online payment from a
+  // registered customer is far rarer than a cashier mistake.
+  for (const r of rows) {
+    if (
+      str(r.payment_method) === 'Online' &&
+      str(r.customer_name) &&
+      str(r.customer_name).trim() !== ''
+    ) {
+      r.payment_method = 'Credit';
+    }
+  }
+
   const orderUpsert = buildUpsert('orders', ORDER_COLS, rows, ORDER_VALUES, receivedAt, branchId, deviceId);
   const result = await client.query(orderUpsert.sql, orderUpsert.params);
 

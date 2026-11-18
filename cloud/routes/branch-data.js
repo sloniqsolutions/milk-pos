@@ -109,6 +109,7 @@ const SHIFT_SELECT = `
     COALESCE(o.total_discounts, 0)   AS total_discounts,
     COALESCE(o.cash_revenue, 0)      AS cash_revenue,
     COALESCE(o.non_cash_revenue, 0)  AS non_cash_revenue,
+    COALESCE(o.credit_sold, 0)       AS credit_sold,
     COALESCE(x.drawer_expenses, 0)   AS drawer_expenses,
     COALESCE(x.expense_count, 0)     AS expense_count,
     COALESCE(cp.credit_collected, 0) AS credit_collected,
@@ -125,7 +126,8 @@ const SHIFT_SELECT = `
            COALESCE(SUM(total), 0)::float8 AS total_revenue,
            COALESCE(SUM(discount), 0)::float8 AS total_discounts,
            COALESCE(SUM(CASE WHEN LOWER(payment_method) = 'cash' THEN total ELSE 0 END), 0)::float8 AS cash_revenue,
-           COALESCE(SUM(CASE WHEN LOWER(payment_method) <> 'cash' THEN total ELSE 0 END), 0)::float8 AS non_cash_revenue
+           COALESCE(SUM(CASE WHEN LOWER(payment_method) <> 'cash' THEN total ELSE 0 END), 0)::float8 AS non_cash_revenue,
+           COALESCE(SUM(CASE WHEN LOWER(payment_method) = 'credit' THEN total ELSE 0 END), 0)::float8 AS credit_sold
       FROM orders WHERE status <> 'voided'
      GROUP BY branch_id, local_shift_id
   ) o ON o.branch_id = s.branch_id AND o.local_shift_id = s.local_id
